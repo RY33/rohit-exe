@@ -9,9 +9,15 @@ from app.config import FRONTEND_ORIGINS
 from app.logging_config import configure_logging, log_event
 from app.routers.contact import router as contact_router
 from app.routers.realtime import router as realtime_router
-
+from app.config import OPENAI_API_KEY
 configure_logging()
 
+
+@app.get("/debug/config")
+async def debug_config():
+    return {
+        "openai_key_configured": bool(OPENAI_API_KEY),
+    }
 
 app = FastAPI(
     title="Rohit.exe Backend",
