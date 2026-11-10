@@ -2,11 +2,11 @@
 import logging
 import sys
 
+logger = logging.getLogger("voice_ai")
+
+
 def configure_logging():
-    """
-    Configure logging for Vercel/serverless deployment.
-    Logs are sent to stdout/stderr instead of local files.
-    """
+    """Configure stdout logging for serverless deployment."""
 
     logging.basicConfig(
         level=logging.INFO,
@@ -15,4 +15,14 @@ def configure_logging():
         force=True
     )
 
-    return logging.getLogger(__name__)
+    return logger
+
+
+def log_event(event_name: str, **kwargs):
+    """Log structured application events."""
+
+    logger.info(
+        "%s | %s",
+        event_name,
+        kwargs if kwargs else ""
+    )
