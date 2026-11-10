@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useState, type FormEvent } from "react";
@@ -29,7 +30,7 @@ const INITIAL_FIELDS: ContactFields = {
 export default function ContactForm({
   onRecruiterChange,
 }: ContactFormProps) {
-  const [fields, setFields] = useState(INITIAL_FIELDS);
+  const [fields, setFields] = useState<ContactFields>(INITIAL_FIELDS);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<{
     kind: "success" | "error";
@@ -42,6 +43,7 @@ export default function ContactForm({
   ) {
     setFields((current) => ({ ...current, [key]: value }));
     setFeedback(null);
+
     if (key === "name" || key === "email") {
       onRecruiterChange({
         name: key === "name" ? value : fields.name,
@@ -52,20 +54,37 @@ export default function ContactForm({
 
   async function submitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+
+    if (isSubmitting) return;
+
     setIsSubmitting(true);
     setFeedback(null);
 
     try {
-      const response = await fetch("/api/contact", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(fields),
-      });
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
+
+      if (!backendUrl) {
+        throw new Error("NEXT_PUBLIC_BACKEND_URL is not configured.");
+      }
+
+      const response = await fetch(
+        `${backendUrl.replace(/\/$/, "")}/api/contact`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(fields),
+        },
+      );
+
       if (!response.ok) {
         let errorMessage =
           "We couldn't send that just now. Please try again in a moment.";
+
         try {
           const errorBody: unknown = await response.json();
+
           if (
             typeof errorBody === "object" &&
             errorBody !== null &&
@@ -75,16 +94,30 @@ export default function ContactForm({
             errorMessage = errorBody.detail;
           }
         } catch {
-          // Keep the generic message when the backend response is not JSON.
+          // Keep the generic message if the response is not JSON.
         }
-        setFeedback({ kind: "error", message: errorMessage });
+
+        setFeedback({
+          kind: "error",
+          message: errorMessage,
+        });
+
         return;
       }
+
       setFeedback({
         kind: "success",
         message: "Message sent. Rohit will be in touch soon!",
       });
-    } catch {
+
+      setFields(INITIAL_FIELDS);
+      onRecruiterChange({
+        name: "",
+        email: "",
+      });
+    } catch (error) {
+      console.error("Contact form submission failed:", error);
+
       setFeedback({
         kind: "error",
         message:
@@ -98,7 +131,9 @@ export default function ContactForm({
   return (
     <form className="contact-form" onSubmit={submitMessage}>
       <label className="contact-field">
-        <span>Name <span aria-hidden="true">*</span></span>
+        <span>
+          Name <span aria-hidden="true">*</span>
+        </span>
         <input
           autoComplete="name"
           name="name"
@@ -110,7 +145,9 @@ export default function ContactForm({
       </label>
 
       <label className="contact-field">
-        <span>Email <span aria-hidden="true">*</span></span>
+        <span>
+          Email <span aria-hidden="true">*</span>
+        </span>
         <input
           autoComplete="email"
           name="email"
@@ -123,7 +160,9 @@ export default function ContactForm({
       </label>
 
       <label className="contact-field">
-        <span>Company <span className="contact-optional">(optional)</span></span>
+        <span>
+          Company <span className="contact-optional">(optional)</span>
+        </span>
         <input
           autoComplete="organization"
           name="company"
@@ -134,7 +173,9 @@ export default function ContactForm({
       </label>
 
       <label className="contact-field">
-        <span>Message <span aria-hidden="true">*</span></span>
+        <span>
+          Message <span aria-hidden="true">*</span>
+        </span>
         <textarea
           name="message"
           required
@@ -174,7 +215,11 @@ export default function ContactForm({
       >
         {isSubmitting ? (
           <>
-            <LoaderCircle size={18} className="contact-spinner" aria-hidden="true" />
+            <LoaderCircle
+              size={18}
+              className="contact-spinner"
+              aria-hidden="true"
+            />
             Sending...
           </>
         ) : (
