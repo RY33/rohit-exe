@@ -515,6 +515,13 @@ try {
       let data: unknown;
       try {
         data = await response.json();
+        console.log("SESSION RESPONSE:", {
+        success: data.success,
+        hasClientSecret: !!data.client_secret,
+        hasInstructions: !!data.instructions,
+        hasSessionId: !!data.session_id,
+        hasEventToken: !!data.event_token,
+});
       } catch {
         failureCategory = "backend";
         diagnostics.finishCredentialRequest(false);
@@ -751,7 +758,9 @@ try {
 
       diagnostics.beginWebRtcConnection();
       logDiagnostic("realtime.session.config.sent");
+      console.log("Starting Realtime WebRTC connection...");
       await activeSession.connect({ apiKey: data.client_secret });
+      console.log("Realtime WebRTC connection established.");
       if (
         mountedRef.current &&
         !connectionRequest.signal.aborted &&
