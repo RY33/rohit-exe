@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import logging
@@ -15,10 +16,12 @@ if TYPE_CHECKING:
 
 RESEND_EMAILS_URL = "https://api.resend.com/emails"
 RESEND_TIMEOUT_SECONDS = 15.0
+
 _EMAIL_PATTERN = re.compile(
     r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
     re.IGNORECASE,
 )
+
 _BEARER_PATTERN = re.compile(r"(?i)(\bbearer\s+)[^\s\"']+")
 _RESEND_KEY_PATTERN = re.compile(r"\bre_[A-Za-z0-9_-]+\b")
 
@@ -37,14 +40,19 @@ def _contact_email_settings() -> tuple[str, str, str]:
     api_key = (config.RESEND_API_KEY or "").strip()
     destination = (config.CONTACT_EMAIL or "").strip()
     sender = (config.RESEND_FROM_EMAIL or "").strip()
+
     if not api_key or not destination or not sender:
-        raise EmailConfigurationError("Contact email settings are incomplete.")
+        raise EmailConfigurationError(
+            "Contact email settings are incomplete."
+        )
+
     try:
         validate_email(destination, check_deliverability=False)
     except EmailNotValidError as error:
         raise EmailConfigurationError(
             "CONTACT_EMAIL must contain one valid email address."
         ) from error
+
     return api_key, destination, sender
 
 
@@ -52,20 +60,30 @@ async def send_contact_email(contact: ContactRequest) -> None:
     configured_destination = (config.CONTACT_EMAIL or "").strip()
     configured_sender = (config.RESEND_FROM_EMAIL or "").strip()
     reply_to = str(contact.email)
+
+    # FIX: log_event accepts keyword arguments, not positional arguments.
     log_event(
         "EMAIL",
-        "-",
-        f"Resolved Resend contact addresses: from={configured_sender!r} "
-        f"to={configured_destination!r} reply_to={reply_to!r} "
-        f"CONTACT_EMAIL_empty={not bool(configured_destination)}",
+        session_id="-",
+        message=(
+            f"Resolved Resend contact addresses: "
+            f"from={configured_sender!r} "
+            f"to={configured_destination!r} "
+            f"reply_to={reply_to!r} "
+            f"CONTACT_EMAIL_empty={not bool(configured_destination)}"
+        ),
     )
+
     api_key, destination, sender = _contact_email_settings()
+
     message_lines = [
         f"Name: {contact.name}",
         f"Email: {reply_to}",
     ]
+
     if contact.company:
         message_lines.append(f"Company: {contact.company}")
+
     message_lines.extend(("", "Message:", contact.message))
 
     payload = {
@@ -77,36 +95,60 @@ async def send_contact_email(contact: ContactRequest) -> None:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=RESEND_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(
+            timeout=RESEND_TIMEOUT_SECONDS
+        ) as client:
             response = await client.post(
                 RESEND_EMAILS_URL,
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers={
+                    "Authorization": f"Bearer {api_key}"
+                },
                 json=payload,
             )
+
     except httpx.RequestError as error:
-        raise EmailDeliveryError("Resend could not be reached.") from error
+        raise EmailDeliveryError(
+            "Resend could not be reached."
+        ) from error
 
     if not response.is_success:
+        # FIX: Pass all additional arguments as keywords.
         log_event(
             "EMAIL",
-            "-",
-            f"Resend rejected a contact notification (HTTP {response.status_code}). "
-            f"Response body: {_redact_resend_error_body(response.text, api_key)}",
-            logging.WARNING,
+            session_id="-",
+            message=(
+                f"Resend rejected a contact notification "
+                f"(HTTP {response.status_code}). "
+                f"Response body: "
+                f"{_redact_resend_error_body(response.text, api_key)}"
+            ),
+            level=logging.WARNING,
         )
-        raise EmailDeliveryError(_resend_failure_message(response, sender))
+
+        raise EmailDeliveryError(
+            _resend_failure_message(response, sender)
+        )
 
 
-def _redact_resend_error_body(body: str, api_key: str) -> str:
+def _redact_resend_error_body(
+    body: str,
+    api_key: str,
+) -> str:
     if api_key:
         body = body.replace(api_key, "[REDACTED]")
+
     body = _BEARER_PATTERN.sub(r"\1[REDACTED]", body)
     body = _RESEND_KEY_PATTERN.sub("[REDACTED]", body)
+
     return _EMAIL_PATTERN.sub("[REDACTED_EMAIL]", body)
 
 
-def _resend_failure_message(response: httpx.Response, sender: str) -> str:
+def _resend_failure_message(
+    response: httpx.Response,
+    sender: str,
+) -> str:
     provider_message = ""
+
     try:
         error_body = response.json()
     except ValueError:
@@ -114,10 +156,14 @@ def _resend_failure_message(response: httpx.Response, sender: str) -> str:
 
     if isinstance(error_body, dict):
         message = error_body.get("message")
+
         if isinstance(message, str):
             provider_message = message.lower()
 
-    is_testing_sender = sender.strip().lower() == "onboarding@resend.dev"
+    is_testing_sender = (
+        sender.strip().lower() == "onboarding@resend.dev"
+    )
+
     testing_recipient_restriction = any(
         phrase in provider_message
         for phrase in (
@@ -127,35 +173,51 @@ def _resend_failure_message(response: httpx.Response, sender: str) -> str:
             "only send",
         )
     )
+
     if is_testing_sender and (
-        testing_recipient_restriction or response.status_code == 403
+        testing_recipient_restriction
+        or response.status_code == 403
     ):
         return (
-            "Resend rejected the testing-sender recipient. Confirm CONTACT_EMAIL "
-            "is the verified account email for the same Resend account as "
-            "RESEND_API_KEY. The onboarding sender cannot send to arbitrary "
+            "Resend rejected the testing-sender recipient. "
+            "Confirm CONTACT_EMAIL is the verified account email "
+            "for the same Resend account as RESEND_API_KEY. "
+            "The onboarding sender cannot send to arbitrary "
             "recruiter addresses."
         )
+
     if response.status_code == 401:
         return (
-            "Resend rejected the API key. Check RESEND_API_KEY in backend/.env, "
-            "then restart the backend."
+            "Resend rejected the API key. Check RESEND_API_KEY "
+            "in backend environment variables."
         )
+
     if response.status_code == 403:
         return (
-            "Resend denied this request. Check the API key's permissions and "
-            "that the sender is allowed for this Resend account."
+            "Resend denied this request. Check the API key's "
+            "permissions and that the sender is allowed "
+            "for this Resend account."
         )
+
     if response.status_code == 429:
-        return "Resend is rate-limiting email requests. Please wait and try again."
+        return (
+            "Resend is rate-limiting email requests. "
+            "Please wait and try again."
+        )
+
     if response.status_code >= 500:
-        return "Resend is temporarily unavailable. Please try again later."
+        return (
+            "Resend is temporarily unavailable. "
+            "Please try again later."
+        )
+
     if response.status_code in {400, 422}:
         return (
-            "Resend rejected the sender or recipient settings. Check the "
-            "RESEND_FROM_EMAIL and CONTACT_EMAIL values in backend/.env."
+            "Resend rejected the sender or recipient settings. "
+            "Check RESEND_FROM_EMAIL and CONTACT_EMAIL."
         )
+
     return (
-        "Resend couldn't send this message. Check the backend email settings "
-        "and try again."
+        "Resend couldn't send this message. "
+        "Check the backend email settings and try again."
     )
