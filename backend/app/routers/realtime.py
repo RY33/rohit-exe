@@ -1,3 +1,4 @@
+
 import hashlib
 import hmac
 import logging
@@ -22,6 +23,7 @@ from app.services.openai_service import (
 )
 
 router = APIRouter()
+
 
 _EVENTS: dict[str, tuple[str, str]] = {
     "voice.button.clicked": ("VOICE", "Speak button clicked"),
@@ -104,6 +106,7 @@ class RealtimeEventPayload(BaseModel):
 
 def create_event_token(session_id: str, expires_at: int) -> str:
     payload = f"{session_id}:{expires_at}".encode("utf-8")
+
     return hmac.new(
         get_event_signing_key(),
         payload,
@@ -117,6 +120,7 @@ def _safe_content(value: str) -> str:
 
 def log_frontend_event(payload: RealtimeEventPayload) -> None:
     category, label = _EVENTS[payload.event]
+
     level = (
         logging.ERROR
         if category == "ERROR"
@@ -124,31 +128,54 @@ def log_frontend_event(payload: RealtimeEventPayload) -> None:
         if payload.event == "transcription.failed"
         else logging.INFO
     )
+
     message = label
+
     if payload.event == "transcription.completed":
         if LOG_TRANSCRIPT_TEXT and payload.text:
             message = f'{label}: "{_safe_content(payload.text)}"'
         else:
             message = "Transcription completed (text redacted)"
+
     elif payload.event == "ai.response.text":
         if LOG_AI_RESPONSE_TEXT and payload.text:
             message = f'{label}: "{_safe_content(payload.text)}"'
         else:
             message = "AI response generated (text redacted)"
+
     if payload.duration_ms is not None:
         message = f"{message} ({payload.duration_ms:.1f} ms)"
-    log_event(category, payload.session_id, message, level)
+
+    log_event(
+        category,
+        session_id=payload.session_id,
+        message=message,
+        level=level,
+    )
 
 
 @router.post("/session", response_model=RealtimeSessionResponse)
 async def create_session() -> RealtimeSessionResponse:
     session_id = str(uuid.uuid4())
-    log_event("SESSION", session_id, "Voice session requested")
+
+    log_event(
+        "SESSION",
+        session_id=session_id,
+        message="Voice session requested",
+    )
+
     try:
         session_data = await create_realtime_session()
+
         event_expires_at = int(time.time()) + EVENT_TOKEN_LIFETIME_SECONDS
         event_token = create_event_token(session_id, event_expires_at)
-        log_event("SESSION", session_id, "Realtime session created")
+
+        log_event(
+            "SESSION",
+            session_id=session_id,
+            message="Realtime session created",
+        )
+
         return {
             "success": True,
             "client_secret": session_data["client_secret"],
@@ -158,24 +185,28 @@ async def create_session() -> RealtimeSessionResponse:
             "event_token": event_token,
             "event_expires_at": event_expires_at,
         }
+
     except RealtimeSessionError as error:
         log_event(
             "ERROR",
-            session_id,
-            f"Realtime session creation failed (HTTP {error.status_code})",
-            logging.WARNING,
+            session_id=session_id,
+            message=f"Realtime session creation failed (HTTP {error.status_code})",
+            level=logging.WARNING,
         )
+
         raise HTTPException(
             status_code=error.status_code,
             detail=str(error),
         ) from error
+
     except Exception as error:
         log_event(
             "ERROR",
-            session_id,
-            f"Unexpected session creation failure: {type(error).__name__}",
-            logging.ERROR,
+            session_id=session_id,
+            message=f"Unexpected session creation failure: {type(error).__name__}",
+            level=logging.ERROR,
         )
+
         raise HTTPException(
             status_code=500,
             detail="Could not create a voice session.",
@@ -187,30 +218,50 @@ async def receive_realtime_event(
     event: RealtimeEventPayload,
     authorization: str | None = Header(default=None),
 ) -> dict[str, bool]:
+
     if event.event not in _EVENTS:
-        raise HTTPException(status_code=422, detail="Unsupported event.")
+        raise HTTPException(
+            status_code=422,
+            detail="Unsupported event.",
+        )
+
     if event.event_expires_at <= int(time.time()):
-        raise HTTPException(status_code=401, detail="Event credential expired.")
+        raise HTTPException(
+            status_code=401,
+            detail="Event credential expired.",
+        )
+
     try:
-        expected_token = create_event_token(event.session_id, event.event_expires_at)
+        expected_token = create_event_token(
+            event.session_id,
+            event.event_expires_at,
+        )
+
     except ValueError as error:
         log_event(
             "ERROR",
-            event.session_id,
-            "Event credential verification is unavailable",
-            logging.ERROR,
+            session_id=event.session_id,
+            message="Event credential verification is unavailable",
+            level=logging.ERROR,
         )
+
         raise HTTPException(
             status_code=401,
             detail="Invalid event credential.",
         ) from error
+
     supplied_token = (
         authorization.removeprefix("Bearer ").strip()
         if authorization
         else ""
     )
+
     if not hmac.compare_digest(supplied_token, expected_token):
-        raise HTTPException(status_code=401, detail="Invalid event credential.")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid event credential.",
+        )
 
     log_frontend_event(event)
+
     return {"accepted": True}
