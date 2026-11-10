@@ -436,11 +436,18 @@ export default function RohitVoiceAgent({
 
       let response: Response;
       try {
-        response = await fetch("/api/realtime/session", {
+
+   const backendUrl =
+        process.env.NEXT_PUBLIC_BACKEND_URL;
+
+      const response = await fetch(
+        `${backendUrl}/api/realtime/session`,
+        {
           method: "POST",
-          signal: connectionRequest.signal,
-        });
-      } catch (error) {
+        }
+      );
+      } 
+      catch (error) {
         failureCategory = "backend";
         diagnostics.finishCredentialRequest(false);
         credentialRequestFinished = true;
