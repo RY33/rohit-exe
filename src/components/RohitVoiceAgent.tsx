@@ -140,7 +140,17 @@ export default function RohitVoiceAgent({
         return;
       }
 
-      void fetch("/api/realtime/events", {
+   const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/$/, "");
+
+if (!backendUrl) {
+  diagnostics.recordError(
+    "Backend event logging error",
+    "NEXT_PUBLIC_BACKEND_URL is not configured."
+  );
+  return;
+}
+
+fetch(`${backendUrl}/api/realtime/events`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${session.eventToken}`,
@@ -434,35 +444,47 @@ export default function RohitVoiceAgent({
       diagnostics.beginCredentialRequest();
       credentialRequestStarted = true;
 
-      let response: Response;
-      try {
+    
+let response: Response;
 
-   const backendUrl =
-        process.env.NEXT_PUBLIC_BACKEND_URL;
+try {
+  const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
 
-      const response = await fetch(
-        `${backendUrl}/api/realtime/session`,
-        {
-          method: "POST",
-        }
-      );
-      } 
-      catch (error) {
-        failureCategory = "backend";
-        diagnostics.finishCredentialRequest(false);
-        credentialRequestFinished = true;
-        if (connectionRequest.signal.aborted) {
-          return;
-        }
-        diagnostics.recordError(
-          "Backend error",
-          "Could not reach the Rohit.exe API.",
-        );
-        throw new Error(
-          "Couldn't reach the Rohit.exe API. Check your internet connection and try again.",
-          { cause: error },
-        );
-      }
+  if (!backendUrl) {
+    throw new Error(
+      "NEXT_PUBLIC_BACKEND_URL is not configured."
+    );
+  }
+
+  response = await fetch(
+    `${backendUrl.replace(/\/$/, "")}/api/realtime/session`,
+    {
+      method: "POST",
+    }
+  );
+
+  console.log("Backend URL:", backendUrl);
+  console.log("Session API status:", response.status);
+
+} catch (error) {
+  failureCategory = "backend";
+  diagnostics.finishCredentialRequest(false);
+  credentialRequestFinished = true;
+
+  if (connectionRequest.signal.aborted) {
+    return;
+  }
+
+  diagnostics.recordError(
+    "Backend error",
+    error instanceof Error ? error.message : "Unknown backend error"
+  );
+
+  throw new Error(
+    "Couldn't reach the Rohit.exe API. Check your backend URL and internet connection.",
+    { cause: error }
+  );
+}
 
       if (!mountedRef.current || connectionRequest.signal.aborted) {
         diagnostics.finishCredentialRequest(false);
