@@ -12,7 +12,7 @@ def configure_logging():
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         handlers=[logging.StreamHandler(sys.stdout)],
-        force=True
+        force=True,
     )
 
     return logger
@@ -21,8 +21,11 @@ def configure_logging():
 def log_event(event_name: str, **kwargs):
     """Log structured application events."""
 
-    logger.info(
+    level = kwargs.pop("level", logging.INFO)
+
+    logger.log(
+        level,
         "%s | %s",
         event_name,
-        kwargs if kwargs else ""
+        kwargs if kwargs else "",
     )
