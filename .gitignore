@@ -1,0 +1,17 @@
+node_modules/
+.next/
+.vercel/
+out/
+coverage/
+*.tsbuildinfo
+
+.env
+.env.*
+!.env.example
+!backend/.env.example
+
+backend/venv/
+backend/.venv*/
+backend/logs/
+__pycache__/
+*.py[cod]
