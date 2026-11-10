@@ -55,11 +55,13 @@ async def handle_unexpected_exception(
 ) -> JSONResponse:
     correlation_id = request.headers.get("x-correlation-id", "-")
     log_event(
-        "ERROR",
-        correlation_id,
+    "ERROR",
+    correlation_id=correlation_id,
+    message=(
         f"Unexpected {request.method} {request.url.path} failure: "
-        f"{type(error).__name__}",
-        logging.ERROR,
+        f"{type(error).__name__}"
+    ),
+    level=logging.ERROR,
     )
     return JSONResponse(
         status_code=500,
