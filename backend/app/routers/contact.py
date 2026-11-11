@@ -12,7 +12,7 @@ from app.services.email_service import (
 )
 
 router = APIRouter()
-//rate limit
+
 RATE_LIMIT_REQUESTS = 5
 RATE_LIMIT_WINDOW_SECONDS = 10 * 60
 MAX_TRACKED_ADDRESSES = 2048
