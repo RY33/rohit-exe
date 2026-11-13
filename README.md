@@ -35,6 +35,10 @@ connected branch. The `/api/contact`, `/api/live/session`, and
 `/api/live/events` routes are part of that deployment. Deploy the Python API as
 a separate Vercel project with `backend` as its root directory, and configure
 `NEXT_PUBLIC_BACKEND_URL` in the frontend project's Production environment.
+The backend allows the production frontend origin `https://rohity-exe.vercel.app`,
+supported local development origins, and any additional exact origins listed in
+its `FRONTEND_ORIGINS` environment variable. Existing Vercel preview URLs
+matching `https://rohit-exe-*-rohity33.vercel.app` are also allowed.
 The canonical voice session endpoint is
 `POST https://rohit-exe-api.vercel.app/api/live/session`; the backend also
 accepts the older `/api/realtime/session` path for compatibility with existing

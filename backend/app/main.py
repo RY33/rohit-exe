@@ -21,31 +21,21 @@ from app.routers.live import (
 
 configure_logging()
 
-app = FastAPI(
+fastapi_app = FastAPI(
     title="Rohit.exe Backend",
     description="Backend for Rohit's AI portfolio",
     version="1.0.0",
 )
 
 # Temporary endpoint to verify OpenAI API key configuration
-@app.get("/debug/config")
+@fastapi_app.get("/debug/config")
 async def debug_config():
     return {
         "openai_key_configured": bool(OPENAI_API_KEY),
     }
 
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=FRONTEND_ORIGINS,
-    allow_origin_regex=r"https://rohit-exe-.*-rohity33\.vercel\.app",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
-)
-
-app.include_router(live_router, prefix="/api/live", tags=["GPT-Live"])
-app.add_api_route(
+fastapi_app.include_router(live_router, prefix="/api/live", tags=["GPT-Live"])
+fastapi_app.add_api_route(
     "/api/realtime/session",
     create_session,
     methods=["POST"],
@@ -53,14 +43,14 @@ app.add_api_route(
     include_in_schema=False,
 )
 
-app.include_router(
+fastapi_app.include_router(
     contact_router,
     prefix="/api/contact",
     tags=["Contact"],
 )
 
 
-@app.middleware("http")
+@fastapi_app.middleware("http")
 async def log_request_diagnostics(request: Request, call_next):
     supplied_request_id = request.headers.get("x-request-id", "")
     request_id = (
@@ -103,7 +93,7 @@ async def log_request_diagnostics(request: Request, call_next):
     return response
 
 
-@app.exception_handler(Exception)
+@fastapi_app.exception_handler(Exception)
 async def handle_unexpected_exception(
     request: Request,
     error: Exception,
@@ -124,19 +114,30 @@ async def handle_unexpected_exception(
     )
 
 
-@app.get("/")
+@fastapi_app.get("/")
 async def home():
     return {"message": "Rohit.exe backend is running!"}
 
 
-@app.get("/health")
+@fastapi_app.get("/health")
 async def health():
     commit = os.getenv("VERCEL_GIT_COMMIT_SHA")
     return {
         "status": "healthy",
         "service": "rohit-exe-backend",
-        "version": app.version,
+        "version": fastapi_app.version,
         "environment": os.getenv("VERCEL_ENV", "local"),
         "deployment": os.getenv("VERCEL_URL"),
         "commit": commit[:12] if commit else None,
     }
+
+
+# Wrapping the full application also adds CORS headers to unhandled error responses.
+app = CORSMiddleware(
+    app=fastapi_app,
+    allow_origins=FRONTEND_ORIGINS,
+    allow_origin_regex=r"https://rohit-exe-.*-rohity33\.vercel\.app",
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+)

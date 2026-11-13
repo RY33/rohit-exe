@@ -113,6 +113,27 @@ class LiveApiTests(unittest.TestCase):
             origin,
         )
 
+    def test_live_session_preflight_allows_production_frontend(self) -> None:
+        origin = "https://rohity-exe.vercel.app"
+        response = self.client.options(
+            "/api/live/session",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type,x-request-id",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["access-control-allow-origin"], origin)
+        self.assertIn(
+            "POST",
+            response.headers["access-control-allow-methods"].split(", "),
+        )
+        allowed_headers = response.headers["access-control-allow-headers"].lower()
+        self.assertIn("content-type", allowed_headers)
+        self.assertIn("x-request-id", allowed_headers)
+
     def test_creates_live_webrtc_session(self) -> None:
         def openai_response(request: httpx.Request) -> httpx.Response:
             self.assertEqual(
@@ -153,9 +174,14 @@ class LiveApiTests(unittest.TestCase):
             response = self.client.post(
                 "/api/live/session",
                 json={"sdp": "v=0\r\n"},
+                headers={"Origin": "https://rohity-exe.vercel.app"},
             )
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["access-control-allow-origin"],
+            "https://rohity-exe.vercel.app",
+        )
         self.assertEqual(
             set(response.json()),
             {
@@ -169,6 +195,45 @@ class LiveApiTests(unittest.TestCase):
         self.assertEqual(response.json()["session_id"], "live_test_session")
         self.assertEqual(response.json()["sdp"], "v=0\r\n")
         self.assertTrue(response.json()["event_token"])
+
+    def test_creates_multiple_live_sessions_consecutively(self) -> None:
+        session_ids = iter(
+            ("live_session_one", "live_session_two", "live_session_three")
+        )
+
+        def openai_response(request: httpx.Request) -> httpx.Response:
+            session_id = next(session_ids)
+            return httpx.Response(
+                201,
+                json={
+                    "session": {"id": session_id},
+                    "transport": {"type": "webrtc", "sdp": "v=0\r\n"},
+                },
+            )
+
+        api_key_patch, client_patch = self.mock_openai_request(openai_response)
+        with api_key_patch, client_patch:
+            responses = [
+                self.client.post(
+                    "/api/live/session",
+                    json={"sdp": "v=0\r\n"},
+                    headers={"Origin": "https://rohity-exe.vercel.app"},
+                )
+                for _ in range(3)
+            ]
+
+        self.assertEqual([response.status_code for response in responses], [200] * 3)
+        self.assertEqual(
+            [response.json()["session_id"] for response in responses],
+            ["live_session_one", "live_session_two", "live_session_three"],
+        )
+        self.assertTrue(
+            all(
+                response.headers["access-control-allow-origin"]
+                == "https://rohity-exe.vercel.app"
+                for response in responses
+            )
+        )
 
     def test_missing_api_key_returns_service_unavailable(self) -> None:
         def unexpected_request(request: httpx.Request) -> httpx.Response:
@@ -185,10 +250,16 @@ class LiveApiTests(unittest.TestCase):
         self.assertIn("OPENAI_API_KEY is missing", response.json()["detail"])
 
     def test_invalid_session_payload_returns_validation_error(self) -> None:
-        response = self.client.post("/api/live/session", json={})
+        origin = "https://rohity-exe.vercel.app"
+        response = self.client.post(
+            "/api/live/session",
+            json={},
+            headers={"Origin": origin},
+        )
 
         self.assertEqual(response.status_code, 422)
         self.assertEqual(response.json()["detail"][0]["loc"], ["body", "sdp"])
+        self.assertEqual(response.headers["access-control-allow-origin"], origin)
 
     def test_legacy_realtime_session_route_uses_live_session_handler(self) -> None:
         def openai_response(request: httpx.Request) -> httpx.Response:

@@ -35,15 +35,21 @@ VOICE_LOG_DIRECTORY = (
     if _log_directory.is_absolute()
     else BACKEND_DIRECTORY / _log_directory
 )
-FRONTEND_ORIGINS = [
+_REQUIRED_FRONTEND_ORIGINS = (
+    "https://rohity-exe.vercel.app",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+)
+_configured_frontend_origins = [
     origin.strip()
-    for origin in os.getenv(
-        "FRONTEND_ORIGINS",
-        "http://localhost:3000,http://127.0.0.1:3000,"
-        "http://localhost:3001,http://127.0.0.1:3001",
-    ).split(",")
+    for origin in os.getenv("FRONTEND_ORIGINS", "").split(",")
     if origin.strip()
 ]
+FRONTEND_ORIGINS = list(
+    dict.fromkeys((*_REQUIRED_FRONTEND_ORIGINS, *_configured_frontend_origins))
+)
 
 
 def get_openai_api_key() -> str:
