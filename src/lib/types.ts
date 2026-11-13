@@ -1,9 +1,7 @@
 export interface SessionResponse {
   success: true;
-  client_secret: string;
-  expires_at: number;
-  instructions: string;
   session_id: string;
+  sdp: string;
   event_token: string;
   event_expires_at: number;
 }
@@ -21,17 +19,12 @@ export type BackendVoiceEvent =
   | "webrtc.connection.state"
   | "webrtc.ice.state"
   | "webrtc.data_channel.opened"
-  | "realtime.session.created"
-  | "realtime.session.config.sent"
-  | "realtime.session.config.confirmed"
-  | "realtime.response.create.sent"
-  | "realtime.response.created"
-  | "realtime.output_item.added"
-  | "realtime.audio.buffer.started"
-  | "realtime.audio.delta"
-  | "realtime.audio.done"
-  | "realtime.response.done"
-  | "realtime.response.failed"
+  | "live.session.created"
+  | "live.session.started"
+  | "live.session.closed"
+  | "live.instructions.sent"
+  | "live.instructions.acknowledged"
+  | "live.transcript.delta"
   | "audio.remote_track.received"
   | "audio.element.attached"
   | "audio.element.play_resolved"
@@ -58,11 +51,9 @@ export type BackendVoiceEvent =
   | "audio.output"
   | "audio.connection.failed"
   | "audio.reconnected"
-  | "vad.speech_started"
-  | "vad.speech_stopped"
   | "api.failure"
   | "webrtc.failure"
-  | "realtime.error"
+  | "live.error"
   | "audio.playback.failure"
   | "unexpected.exception"
   | "latency.response";
@@ -107,11 +98,9 @@ export function isSessionResponse(value: unknown): value is SessionResponse {
 
   return (
     response.success === true &&
-    typeof response.client_secret === "string" &&
-    typeof response.expires_at === "number" &&
-    Number.isFinite(response.expires_at) &&
-    typeof response.instructions === "string" &&
     typeof response.session_id === "string" &&
+    typeof response.sdp === "string" &&
+    response.sdp.length > 0 &&
     typeof response.event_token === "string" &&
     typeof response.event_expires_at === "number" &&
     Number.isFinite(response.event_expires_at)

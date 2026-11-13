@@ -2,12 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence } from "framer-motion";
-import { tool } from "@openai/agents";
-import {
-  OpenAIRealtimeWebRTC,
-  RealtimeAgent,
-  RealtimeSession,
-} from "@openai/agents/realtime";
 
 import ConversationTranscript from "@/components/ConversationTranscript";
 import SpeakButton from "@/components/SpeakButton";
@@ -16,7 +10,7 @@ import InitializationMeme from "@/components/memes/InitializationMeme";
 import ReactionMeme from "@/components/memes/ReactionMeme";
 import ShortlistingScreen from "@/components/memes/ShortlistingScreen";
 import { useConversationTranscript } from "@/hooks/useConversationTranscript";
-import { useRealtimeSessionEvents } from "@/hooks/useRealtimeSessionEvents";
+import { useLiveSessionEvents } from "@/hooks/useLiveSessionEvents";
 import { useVoiceDiagnostics } from "@/hooks/useVoiceDiagnostics";
 import { MemeAudioController } from "@/lib/MemeAudioController";
 import type { BackendVoiceEvent } from "@/lib/types";
@@ -39,15 +33,14 @@ type VoiceStatus =
 type UnknownRecord = Record<string, unknown>;
 
 const INITIAL_GREETING =
-  "Hey there! I'm Rohit.exe. Think of me as Rohit's digital representative. You can ask me about his engineering experience, AI projects, technical skills, or anything else you'd like to explore. So, what are we curious about today?";
+  "Hey! I'm Rohit.exe — Rohit's AI-powered digital portfolio. Think of me as the slightly more talkative version of his resume. I can walk you through the AI products he's built, the scale they operate at, and the impact they've made. What would you like to know?";
 const INITIAL_AUDIO_TIMEOUT_MS = 20_000;
 const REACTION_DISPLAY_DURATION_MS = 5_000;
-const SESSION_CONFIGURATION_ACK_TIMEOUT_MS = 2_000;
-const SESSION_CONFIGURATION_ACK_ERROR =
-  "Realtime session configuration was not acknowledged by the server.";
+const LIVE_SESSION_START_TIMEOUT_MS = 15_000;
+const LIVE_SESSION_CLOSE_TIMEOUT_MS = 3_000;
+const ICE_GATHERING_TIMEOUT_MS = 10_000;
 interface RohitVoiceAgentProps {
   onConversationEnded: () => void;
-  onOpenContact: () => void;
 }
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -58,8 +51,8 @@ function stopMicrophone(stream: MediaStream | null): void {
   stream?.getTracks().forEach((track) => track.stop());
 }
 
-function waitForSessionConfigurationAcknowledgement(
-  acknowledgement: Promise<void>,
+function waitForLiveSessionStart(
+  started: Promise<void>,
   signal: AbortSignal,
 ): Promise<void> {
   if (signal.aborted) {
@@ -70,14 +63,14 @@ function waitForSessionConfigurationAcknowledgement(
   let abortHandler: (() => void) | null = null;
   const timeout = new Promise<never>((_, reject) => {
     timeoutId = setTimeout(
-      () => reject(new Error(SESSION_CONFIGURATION_ACK_ERROR)),
-      SESSION_CONFIGURATION_ACK_TIMEOUT_MS,
+      () => reject(new Error("GPT-Live did not confirm the session startup in time.")),
+      LIVE_SESSION_START_TIMEOUT_MS,
     );
     abortHandler = () => reject(new Error("The voice connection was cancelled."));
     signal.addEventListener("abort", abortHandler, { once: true });
   });
 
-  return Promise.race([acknowledgement, timeout]).finally(() => {
+  return Promise.race([started, timeout]).finally(() => {
     if (timeoutId !== null) {
       clearTimeout(timeoutId);
     }
@@ -89,7 +82,6 @@ function waitForSessionConfigurationAcknowledgement(
 
 export default function RohitVoiceAgent({
   onConversationEnded,
-  onOpenContact,
 }: RohitVoiceAgentProps) {
   const [status, setStatus] = useState<VoiceStatus>("idle");
   const [errorMessage, setErrorMessage] = useState("");
@@ -97,7 +89,9 @@ export default function RohitVoiceAgent({
   const [audioPlaybackError, setAudioPlaybackError] = useState("");
   const [shortlisted, setShortlisted] = useState(false);
   const remoteAudioElementRef = useRef<HTMLAudioElement>(null);
-  const sessionRef = useRef<RealtimeSession | null>(null);
+  const sessionRef = useRef<string | null>(null);
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const dataChannelRef = useRef<RTCDataChannel | null>(null);
   const sessionListenersCleanupRef = useRef<(() => void) | null>(null);
   const peerConnectionListenersCleanupRef = useRef<(() => void) | null>(null);
   const microphoneStreamRef = useRef<MediaStream | null>(null);
@@ -111,8 +105,10 @@ export default function RohitVoiceAgent({
       durationMs?: number;
     }>
   >([]);
-  const sessionConfigurationConfirmedRef = useRef(false);
-  const sessionConfigurationResolveRef = useRef<(() => void) | null>(null);
+  const sessionStartedRef = useRef(false);
+  const sessionCloseResolverRef = useRef<(() => void) | null>(null);
+  const sessionCloseRequestedRef = useRef(false);
+  const sessionErrorHandlerRef = useRef<(error: unknown) => void>(() => {});
   const backendEventSessionRef = useRef<{
     sessionId: string;
     eventToken: string;
@@ -120,7 +116,6 @@ export default function RohitVoiceAgent({
     startedAt: number;
   } | null>(null);
   const mountedRef = useRef(false);
-  const initialGreetingTriggeredRef = useRef(false);
   const firstAssistantAudioRef = useRef(false);
   const transitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reactionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -140,17 +135,15 @@ export default function RohitVoiceAgent({
         return;
       }
 
-   const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/$/, "");
-
-if (!backendUrl) {
-  diagnostics.recordError(
-    "Backend event logging error",
-    "NEXT_PUBLIC_BACKEND_URL is not configured."
-  );
-  return;
-}
-
-fetch(`${backendUrl}/api/realtime/events`, {
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/+$/, "");
+      if (!backendUrl) {
+        diagnostics.recordError(
+          "Backend event logging error",
+          "NEXT_PUBLIC_BACKEND_URL is not configured.",
+        );
+        return;
+      }
+      void fetch(`${backendUrl ?? ""}/api/live/events`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${session.eventToken}`,
@@ -198,7 +191,7 @@ fetch(`${backendUrl}/api/realtime/events`, {
             ? "VOICE"
             : event.startsWith("webrtc.")
               ? "WEBRTC"
-              : "REALTIME";
+              : "LIVE";
       const message = `[${category}] ${new Date().toISOString()} [session=${sessionId}] ${event}${detail ? ` ${detail}` : ""}`;
       console.info(message);
       diagnostics.log(message);
@@ -236,6 +229,43 @@ fetch(`${backendUrl}/api/realtime/events`, {
       audioElement.srcObject = null;
     }
   }, []);
+  const releaseLiveConnection = useCallback(
+    (sendCloseEvent: boolean) => {
+      const channel = dataChannelRef.current;
+      if (
+        sendCloseEvent &&
+        sessionStartedRef.current &&
+        channel?.readyState === "open" &&
+        !sessionCloseRequestedRef.current
+      ) {
+        sessionCloseRequestedRef.current = true;
+        channel.send(
+          JSON.stringify({
+            type: "session.close",
+            event_id: crypto.randomUUID(),
+          }),
+        );
+      }
+
+      sessionRef.current = null;
+      sessionStartedRef.current = false;
+      sessionListenersCleanupRef.current?.();
+      sessionListenersCleanupRef.current = null;
+      peerConnectionListenersCleanupRef.current?.();
+      peerConnectionListenersCleanupRef.current = null;
+      if (channel && channel.readyState !== "closed") {
+        channel.close();
+      }
+      dataChannelRef.current = null;
+      peerConnectionRef.current?.close();
+      peerConnectionRef.current = null;
+      sessionCloseRequestedRef.current = false;
+      clearRemoteAudio();
+      stopMicrophone(microphoneStreamRef.current);
+      microphoneStreamRef.current = null;
+    },
+    [clearRemoteAudio],
+  );
   const clearInitialAudioTimer = useCallback(() => {
     if (initialAudioTimerRef.current !== null) {
       clearTimeout(initialAudioTimerRef.current);
@@ -273,33 +303,14 @@ fetch(`${backendUrl}/api/realtime/events`, {
     }
     firstAssistantAudioRef.current = true;
     clearInitialAudioTimer();
-    microphoneStreamRef.current
-      ?.getAudioTracks()
-      .forEach((track) => (track.enabled = true));
-    sessionRef.current?.mute(false);
     updateStatus("speaking");
     audioControllerRef.current?.stopMusic();
     logDiagnostic("initialization.music.stopped");
   }, [clearInitialAudioTimer, logDiagnostic, updateStatus]);
-  const onInitialGreetingFinished = useCallback(() => {
-    microphoneStreamRef.current
-      ?.getAudioTracks()
-      .forEach((track) => (track.enabled = true));
-    sessionRef.current?.mute(false);
-    updateStatus("listening");
-  }, [updateStatus]);
-  const onSessionConfigured = useCallback(() => {
-    sessionConfigurationConfirmedRef.current = true;
-    sessionConfigurationResolveRef.current?.();
-    sessionConfigurationResolveRef.current = null;
-  }, []);
-  const realtimeEvents = useRealtimeSessionEvents(
+  const liveEvents = useLiveSessionEvents(
     transcript,
     diagnostics,
     updateStatus,
-    handleFirstAiAudioStarted,
-    onInitialGreetingFinished,
-    onSessionConfigured,
     logBackendEvent,
     logDiagnostic,
   );
@@ -314,10 +325,21 @@ fetch(`${backendUrl}/api/realtime/events`, {
       setAudioPlaybackError(message);
       logDiagnostic("audio.element.play_error", message);
     };
+    const onRemoteAudioPlaying = () => {
+      const isFirstAssistantAudio = !firstAssistantAudioRef.current;
+      handleFirstAiAudioStarted();
+      if (isFirstAssistantAudio) {
+        logDiagnostic("audio.element.playing");
+        logBackendEvent("audio.playback.started");
+        logBackendEvent("ai.audio.playback_started");
+      }
+    };
     audioElement?.addEventListener("error", onRemoteAudioError);
+    audioElement?.addEventListener("playing", onRemoteAudioPlaying);
 
     return () => {
       audioElement?.removeEventListener("error", onRemoteAudioError);
+      audioElement?.removeEventListener("playing", onRemoteAudioPlaying);
       mountedRef.current = false;
       const backendSession = backendEventSessionRef.current;
       if (backendSession) {
@@ -332,12 +354,7 @@ fetch(`${backendUrl}/api/realtime/events`, {
       }
       connectionRequestRef.current?.abort();
       connectionRequestRef.current = null;
-      sessionListenersCleanupRef.current?.();
-      sessionListenersCleanupRef.current = null;
-      peerConnectionListenersCleanupRef.current?.();
-      peerConnectionListenersCleanupRef.current = null;
-      sessionRef.current?.close();
-      sessionRef.current = null;
+      releaseLiveConnection(true);
       clearInitialAudioTimer();
       clearRemoteAudio();
       stopMicrophone(microphoneStreamRef.current);
@@ -356,6 +373,8 @@ fetch(`${backendUrl}/api/realtime/events`, {
     clearInitialAudioTimer,
     clearRemoteAudio,
     getAudioController,
+    handleFirstAiAudioStarted,
+    releaseLiveConnection,
     logDiagnostic,
     logBackendEvent,
   ]);
@@ -365,9 +384,13 @@ fetch(`${backendUrl}/api/realtime/events`, {
       logDiagnostic("voice.button.clicked", "Ignored duplicate start request");
       return;
     }
+
     backendEventSessionRef.current = null;
     pendingBackendEventsRef.current = [];
     diagnosticSessionIdRef.current = `client-${crypto.randomUUID()}`;
+    sessionStartedRef.current = false;
+    sessionCloseRequestedRef.current = false;
+    firstAssistantAudioRef.current = false;
     diagnostics.startConversation();
     logDiagnostic("voice.button.clicked");
 
@@ -379,29 +402,65 @@ fetch(`${backendUrl}/api/realtime/events`, {
       clearTimeout(reactionTimerRef.current);
       reactionTimerRef.current = null;
     }
-    initialGreetingTriggeredRef.current = false;
-    firstAssistantAudioRef.current = false;
-    sessionConfigurationConfirmedRef.current = false;
-    sessionConfigurationResolveRef.current = null;
     setMemeAudioError("");
     setAudioPlaybackError("");
     setShortlisted(false);
-    const audioController = getAudioController();
-    audioController.stopAll();
+    getAudioController().stopAll();
 
     const connectionRequest = new AbortController();
     connectionRequestRef.current = connectionRequest;
-    realtimeEvents.reset();
+    liveEvents.reset();
     transcript.clearTranscript();
     updateStatus("requesting_permission");
     setErrorMessage("");
 
-    let session: RealtimeSession | null = null;
-    let credentialRequestFinished = false;
-    let credentialRequestStarted = false;
-    let failureCategory: "backend" | "microphone" | "openai" | null = null;
     let microphoneStream: MediaStream | null = null;
-    let sessionConfigurationAcknowledgement: Promise<void> | null = null;
+    let failureCategory: "backend" | "microphone" | "openai" = "backend";
+    let credentialRequestStarted = false;
+    let credentialRequestFinished = false;
+    let sessionErrorHandled = false;
+    let resolveSessionStarted: (() => void) | null = null;
+    let rejectSessionStarted: ((error: Error) => void) | null = null;
+    const sessionStarted = new Promise<void>((resolve, reject) => {
+      resolveSessionStarted = resolve;
+      rejectSessionStarted = reject;
+    });
+
+    const handleSessionError = (error: unknown) => {
+      if (
+        sessionErrorHandled ||
+        !mountedRef.current ||
+        connectionRequest.signal.aborted ||
+        connectionRequestRef.current !== connectionRequest
+      ) {
+        return;
+      }
+      sessionErrorHandled = true;
+      const message = getConnectionErrorMessage(error);
+      diagnostics.recordError("GPT-Live connection error", message);
+      logBackendEvent(
+        sessionRef.current ? "live.error" : "webrtc.failure",
+        error instanceof Error ? error.name : undefined,
+      );
+      if (backendEventSessionRef.current) {
+        logBackendEvent(
+          "session.disconnected",
+          undefined,
+          performance.now() - backendEventSessionRef.current.startedAt,
+        );
+        logBackendEvent("microphone.disconnected");
+        backendEventSessionRef.current = null;
+      }
+      getAudioController().stopAll();
+      logDiagnostic("initialization.music.stopped");
+      clearInitialAudioTimer();
+      releaseLiveConnection(true);
+      connectionRequestRef.current = null;
+      diagnostics.endConversation();
+      setErrorMessage(message);
+      updateStatus("error");
+    };
+    sessionErrorHandlerRef.current = handleSessionError;
 
     try {
       diagnostics.log("Microphone permission requested");
@@ -411,9 +470,7 @@ fetch(`${backendUrl}/api/realtime/events`, {
             "Microphone access is not available in this browser or page context.",
           );
         }
-        microphoneStream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-        });
+        microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       } catch (error) {
         failureCategory = "microphone";
         const message = getConnectionErrorMessage(error);
@@ -433,76 +490,247 @@ fetch(`${backendUrl}/api/realtime/events`, {
       logDiagnostic("microphone.permission.granted");
       clearRemoteAudio();
       updateStatus("initializing");
-      void audioController.startMusic((message) => {
+      void getAudioController().startMusic((message) => {
         if (mountedRef.current) {
           setMemeAudioError(message);
           logDiagnostic("audio.playback.failure", message);
         }
       });
 
+      const remoteAudioElement = remoteAudioElementRef.current;
+      if (!remoteAudioElement) {
+        throw new Error("The remote audio playback element is unavailable.");
+      }
+      remoteAudioElement.autoplay = true;
+      remoteAudioElement.muted = false;
+      remoteAudioElement.volume = 1;
+
+      const peerConnection = new RTCPeerConnection();
+      peerConnectionRef.current = peerConnection;
+      logDiagnostic("webrtc.peer.created");
+      diagnostics.beginWebRtcConnection();
+
+      const peerConnectionCleanups: Array<() => void> = [];
+      const onConnectionStateChange = () => {
+        const connectionState = peerConnection.connectionState;
+        logDiagnostic("webrtc.connection.state", connectionState);
+        diagnostics.recordWebRtcStatus(
+          connectionState === "connected"
+            ? "connected"
+            : connectionState === "disconnected" || connectionState === "failed" || connectionState === "closed"
+              ? "disconnected"
+              : "connecting",
+        );
+        if (connectionState === "failed") {
+          handleSessionError(new Error("The GPT-Live WebRTC connection failed."));
+        }
+      };
+      const onIceConnectionStateChange = () => {
+        logDiagnostic("webrtc.ice.state", peerConnection.iceConnectionState);
+      };
+      const onRemoteTrack = (event: RTCTrackEvent) => {
+        if (
+          event.track.kind !== "audio" ||
+          peerConnectionRef.current !== peerConnection ||
+          connectionRequest.signal.aborted
+        ) {
+          return;
+        }
+
+        const remoteStream = event.streams[0] ?? new MediaStream([event.track]);
+        remoteAudioElement.srcObject = remoteStream;
+        remoteAudioElement.muted = false;
+        remoteAudioElement.volume = 1;
+        remoteAudioElement.autoplay = true;
+        logDiagnostic(
+          "audio.remote_track.received",
+          `enabled=${event.track.enabled}; muted=${event.track.muted}; readyState=${event.track.readyState}`,
+        );
+        logDiagnostic(
+          "audio.element.attached",
+          `tracks=${remoteStream.getAudioTracks().length}`,
+        );
+
+        const onTrackMuted = () => logDiagnostic("audio.track.muted");
+        const onTrackUnmuted = () => {
+          if (peerConnectionRef.current !== peerConnection) {
+            return;
+          }
+          logDiagnostic("audio.track.unmuted");
+          handleFirstAiAudioStarted();
+          void playRemoteAudio();
+        };
+        event.track.addEventListener("mute", onTrackMuted);
+        event.track.addEventListener("unmute", onTrackUnmuted);
+        peerConnectionCleanups.push(() => {
+          event.track.removeEventListener("mute", onTrackMuted);
+          event.track.removeEventListener("unmute", onTrackUnmuted);
+        });
+        void playRemoteAudio();
+      };
+      peerConnection.addEventListener("connectionstatechange", onConnectionStateChange);
+      peerConnection.addEventListener("iceconnectionstatechange", onIceConnectionStateChange);
+      peerConnection.addEventListener("track", onRemoteTrack);
+      peerConnectionCleanups.push(() => {
+        peerConnection.removeEventListener("connectionstatechange", onConnectionStateChange);
+        peerConnection.removeEventListener("iceconnectionstatechange", onIceConnectionStateChange);
+        peerConnection.removeEventListener("track", onRemoteTrack);
+      });
+      peerConnectionListenersCleanupRef.current = () => {
+        for (const cleanup of peerConnectionCleanups.splice(0)) {
+          cleanup();
+        }
+      };
+      onConnectionStateChange();
+      onIceConnectionStateChange();
+
+      for (const track of microphoneStream.getAudioTracks()) {
+        peerConnection.addTrack(track, microphoneStream);
+      }
+      const dataChannel = peerConnection.createDataChannel("oai-events");
+      dataChannelRef.current = dataChannel;
+      const onDataChannelOpen = () => logDiagnostic("webrtc.data_channel.opened");
+      dataChannel.addEventListener("open", onDataChannelOpen);
+
+      const onLiveSessionStarted = () => {
+        if (sessionStartedRef.current || dataChannel.readyState !== "open") {
+          return;
+        }
+        sessionStartedRef.current = true;
+        updateStatus("connected");
+        logBackendEvent("session.connected");
+        logBackendEvent("live.session.started");
+        try {
+          dataChannel.send(
+            JSON.stringify({
+              type: "session.instructions.append",
+              event_id: crypto.randomUUID(),
+              delegation_id: null,
+              content: `Immediately say the following opening exactly once, before responding to the caller: ${INITIAL_GREETING}`,
+            }),
+          );
+          logBackendEvent("live.instructions.sent");
+          initialAudioTimerRef.current = setTimeout(() => {
+            initialAudioTimerRef.current = null;
+            if (
+              sessionRef.current &&
+              !firstAssistantAudioRef.current
+            ) {
+              handleSessionError(
+                new Error(
+                  "GPT-Live connected, but no opening audio played. Check your audio output and try again.",
+                ),
+              );
+            }
+          }, INITIAL_AUDIO_TIMEOUT_MS);
+          resolveSessionStarted?.();
+        } catch (error) {
+          const liveError = error instanceof Error ? error : new Error(String(error));
+          rejectSessionStarted?.(liveError);
+          handleSessionError(liveError);
+        }
+      };
+      const cleanupLiveListeners = liveEvents.attachDataChannelListeners(
+        dataChannel,
+        () => peerConnectionRef.current === peerConnection,
+        {
+          onSessionStarted: onLiveSessionStarted,
+          onSessionClosed: () => {
+            sessionCloseResolverRef.current?.();
+            if (!sessionCloseRequestedRef.current) {
+              handleSessionError(new Error("GPT-Live closed the session unexpectedly."));
+            }
+          },
+          onError: (error) => {
+            rejectSessionStarted?.(error);
+            handleSessionError(error);
+          },
+        },
+      );
+      sessionListenersCleanupRef.current = () => {
+        dataChannel.removeEventListener("open", onDataChannelOpen);
+        cleanupLiveListeners();
+      };
+
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+      if (peerConnection.iceGatheringState !== "complete") {
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            cleanup();
+            reject(new Error("Timed out while gathering WebRTC ICE candidates."));
+          }, ICE_GATHERING_TIMEOUT_MS);
+          const onAbort = () => {
+            cleanup();
+            reject(new Error("The voice connection was cancelled."));
+          };
+          const onIceGatheringStateChange = () => {
+            if (peerConnection.iceGatheringState === "complete") {
+              cleanup();
+              resolve();
+            }
+          };
+          const cleanup = () => {
+            clearTimeout(timeout);
+            connectionRequest.signal.removeEventListener("abort", onAbort);
+            peerConnection.removeEventListener(
+              "icegatheringstatechange",
+              onIceGatheringStateChange,
+            );
+          };
+          connectionRequest.signal.addEventListener("abort", onAbort, { once: true });
+          peerConnection.addEventListener(
+            "icegatheringstatechange",
+            onIceGatheringStateChange,
+          );
+          onIceGatheringStateChange();
+        });
+      }
+      if (connectionRequest.signal.aborted) {
+        return;
+      }
+      const sdpOffer = peerConnection.localDescription?.sdp;
+      if (!sdpOffer) {
+        throw new Error("The browser did not produce a WebRTC SDP offer.");
+      }
+
       logDiagnostic("voice.session.creation.started");
       diagnostics.beginCredentialRequest();
       credentialRequestStarted = true;
-
-    
-let response: Response;
-
-try {
-  const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
-
-  if (!backendUrl) {
-    throw new Error(
-      "NEXT_PUBLIC_BACKEND_URL is not configured."
-    );
-  }
-
-  response = await fetch(
-    `${backendUrl.replace(/\/$/, "")}/api/realtime/session`,
-    {
-      method: "POST",
-    }
-  );
-
-  console.log("Backend URL:", backendUrl);
-  console.log("Session API status:", response.status);
-
-} catch (error) {
-  failureCategory = "backend";
-  diagnostics.finishCredentialRequest(false);
-  credentialRequestFinished = true;
-
-  if (connectionRequest.signal.aborted) {
-    return;
-  }
-
-  diagnostics.recordError(
-    "Backend error",
-    error instanceof Error ? error.message : "Unknown backend error"
-  );
-
-  throw new Error(
-    "Couldn't reach the Rohit.exe API. Check your backend URL and internet connection.",
-    { cause: error }
-  );
-}
-
-      if (!mountedRef.current || connectionRequest.signal.aborted) {
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/+$/, "");
+      if (!backendUrl) {
+        throw new Error("NEXT_PUBLIC_BACKEND_URL is not configured.");
+      }
+      let response: Response;
+      try {
+        response = await fetch(
+          `${backendUrl}/api/live/session`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sdp: sdpOffer }),
+            signal: connectionRequest.signal,
+            cache: "no-store",
+          },
+        );
+      } catch (error) {
+        if (connectionRequest.signal.aborted) {
+          return;
+        }
         diagnostics.finishCredentialRequest(false);
         credentialRequestFinished = true;
-        return;
+        diagnostics.recordError("Backend error", "Could not reach the Rohit.exe API.");
+        throw new Error(
+          "Couldn't reach the Rohit.exe API. Check your internet connection and try again.",
+          { cause: error },
+        );
       }
 
       if (!response.ok) {
-        failureCategory = "backend";
-        diagnostics.finishCredentialRequest(false);
-        credentialRequestFinished = true;
-        let detail = `Unable to create a voice session (HTTP ${response.status}).`;
+        let detail = `Unable to create a GPT-Live session (HTTP ${response.status}).`;
         try {
           const errorBody: unknown = await response.json();
-          if (
-            isRecord(errorBody) &&
-            typeof errorBody.detail === "string"
-          ) {
+          if (isRecord(errorBody) && typeof errorBody.detail === "string") {
             detail = errorBody.detail;
           }
         } catch {
@@ -516,41 +744,22 @@ try {
       try {
         data = await response.json();
       } catch {
-        failureCategory = "backend";
-        diagnostics.finishCredentialRequest(false);
-        credentialRequestFinished = true;
-        diagnostics.recordError(
-          "Backend error",
-          "The backend returned an invalid voice session response.",
-        );
-        throw new Error("The backend returned an invalid voice session response.");
-      }
-      if (!mountedRef.current || connectionRequest.signal.aborted) {
-        diagnostics.finishCredentialRequest(false);
-        credentialRequestFinished = true;
-        return;
+        throw new Error("The backend returned an invalid GPT-Live session response.");
       }
       if (!isSessionResponse(data)) {
-        failureCategory = "backend";
-        diagnostics.finishCredentialRequest(false);
-        credentialRequestFinished = true;
-        diagnostics.recordError(
-          "Backend error",
-          "The backend returned an invalid voice session response.",
-        );
-        throw new Error("The backend returned an invalid voice session response.");
+        throw new Error("The backend returned an invalid GPT-Live session response.");
       }
 
       console.log("SESSION RESPONSE:", {
         success: data.success,
-        hasClientSecret: !!data.client_secret,
-        hasInstructions: !!data.instructions,
+        hasSdp: Boolean(data.sdp),
         hasSessionId: !!data.session_id,
         hasEventToken: !!data.event_token,
       });
 
       diagnostics.finishCredentialRequest(true);
       credentialRequestFinished = true;
+      sessionRef.current = data.session_id;
       backendEventSessionRef.current = {
         sessionId: data.session_id,
         eventToken: data.event_token,
@@ -559,322 +768,121 @@ try {
       };
       diagnosticSessionIdRef.current = data.session_id;
       for (const queuedEvent of pendingBackendEventsRef.current.splice(0)) {
-        logBackendEvent(
-          queuedEvent.event,
-          queuedEvent.text,
-          queuedEvent.durationMs,
-        );
+        logBackendEvent(queuedEvent.event, queuedEvent.text, queuedEvent.durationMs);
       }
       logDiagnostic("voice.session.creation.completed");
+      logBackendEvent("live.session.created");
       logBackendEvent("microphone.connected");
-      microphoneStream
-        .getAudioTracks()
-        .forEach((track) => (track.enabled = false));
-
       failureCategory = "openai";
-      const openContactTool = tool({
-        name: "open_contact_form",
-        description:
-          "Open Rohit's contact options when the user asks how to contact him, send a message, or schedule a meeting. This only opens the contact interface; never send a message or book a meeting.",
-        parameters: {
-          type: "object",
-          properties: {},
-          required: [],
-          additionalProperties: false,
-        },
-        execute: async () => {
-          onOpenContact();
-          return "Contact options are open. The user must choose and submit any message or booking themselves.";
-        },
-      });
-      const agent = new RealtimeAgent({
-        name: "Rohit.exe",
-        instructions: data.instructions,
-        voice: "marin",
-        tools: [openContactTool],
-      });
-      const remoteAudioElement = remoteAudioElementRef.current;
-      if (!remoteAudioElement) {
-        throw new Error("The remote audio playback element is unavailable.");
-      }
-      remoteAudioElement.autoplay = true;
-      remoteAudioElement.muted = false;
-      remoteAudioElement.volume = 1;
-      const peerConnectionListenerCleanups: Array<() => void> = [];
-      const webRtcTransport = new OpenAIRealtimeWebRTC({
-        mediaStream: microphoneStream,
-        audioElement: remoteAudioElement,
-        changePeerConnection: (peerConnection) => {
-          logDiagnostic("webrtc.peer.created");
-          const onConnectionStateChange = () => {
-            logDiagnostic(
-              "webrtc.connection.state",
-              peerConnection.connectionState,
-            );
-          };
-          const onIceConnectionStateChange = () => {
-            logDiagnostic(
-              "webrtc.ice.state",
-              peerConnection.iceConnectionState,
-            );
-          };
-          const onRemoteTrack = (event: RTCTrackEvent) => {
-            if (
-              event.track.kind !== "audio" ||
-              sessionRef.current !== session ||
-              connectionRequest.signal.aborted
-            ) {
-              return;
-            }
-            const remoteStream =
-              event.streams[0] ?? new MediaStream([event.track]);
-            if (remoteAudioElement.srcObject !== remoteStream) {
-              remoteAudioElement.srcObject = remoteStream;
-            }
-            remoteAudioElement.muted = false;
-            remoteAudioElement.volume = 1;
-            remoteAudioElement.autoplay = true;
-            if (!event.track.enabled) {
-              event.track.enabled = true;
-            }
-            logDiagnostic(
-              "audio.remote_track.received",
-              `kind=${event.track.kind}; enabled=${event.track.enabled}; muted=${event.track.muted}; readyState=${event.track.readyState}`,
-            );
-            logDiagnostic(
-              "audio.element.attached",
-              `tracks=${remoteStream.getAudioTracks().length}; muted=${remoteAudioElement.muted}; volume=${remoteAudioElement.volume}`,
-            );
-            const onTrackMuted = () => {
-              logDiagnostic("audio.track.muted");
-            };
-            const onTrackUnmuted = () => {
-              if (sessionRef.current !== session) {
-                return;
-              }
-              logDiagnostic(
-                "audio.track.unmuted",
-                `enabled=${event.track.enabled}; readyState=${event.track.readyState}`,
-              );
-              realtimeEvents.notifyRemoteAudioTrackUnmuted();
-              void playRemoteAudio();
-            };
-            event.track.addEventListener("mute", onTrackMuted);
-            event.track.addEventListener("unmute", onTrackUnmuted);
-            peerConnectionListenerCleanups.push(() => {
-              event.track.removeEventListener("mute", onTrackMuted);
-              event.track.removeEventListener("unmute", onTrackUnmuted);
-            });
-            void playRemoteAudio();
-          };
-          peerConnection.addEventListener(
-            "connectionstatechange",
-            onConnectionStateChange,
-          );
-          peerConnection.addEventListener(
-            "iceconnectionstatechange",
-            onIceConnectionStateChange,
-          );
-          peerConnection.addEventListener("track", onRemoteTrack);
-          peerConnectionListenerCleanups.push(() => {
-            peerConnection.removeEventListener(
-              "connectionstatechange",
-              onConnectionStateChange,
-            );
-            peerConnection.removeEventListener(
-              "iceconnectionstatechange",
-              onIceConnectionStateChange,
-            );
-            peerConnection.removeEventListener("track", onRemoteTrack);
-          });
-          peerConnectionListenersCleanupRef.current = () => {
-            for (const cleanup of peerConnectionListenerCleanups.splice(0)) {
-              cleanup();
-            }
-          };
-          onConnectionStateChange();
-          onIceConnectionStateChange();
-          return peerConnection;
-        },
-      });
-      session = new RealtimeSession(agent, {
-        model: "gpt-realtime-2.1",
-        transport: webRtcTransport,
-      });
-      sessionRef.current = session;
-      logDiagnostic("realtime.session.created");
-      sessionConfigurationAcknowledgement = new Promise<void>((resolve) => {
-        sessionConfigurationResolveRef.current = resolve;
-      });
 
-      const activeSession = session;
-      let sessionErrorHandled = false;
-      const onSessionError = (error: unknown) => {
-        if (sessionErrorHandled || sessionRef.current !== activeSession) {
-          return;
-        }
-        sessionErrorHandled = true;
-        const message = getConnectionErrorMessage(error);
-        diagnostics.recordError("Realtime session error", message);
-        logBackendEvent(
-          "webrtc.failure",
-          error instanceof Error ? error.name : undefined,
-        );
-        const backendSession = backendEventSessionRef.current;
-        if (backendSession) {
-          logBackendEvent(
-            "session.disconnected",
-            undefined,
-            performance.now() - backendSession.startedAt,
-          );
-          logBackendEvent("microphone.disconnected");
-        }
-        getAudioController().stopAll();
-        logDiagnostic("initialization.music.stopped");
-        backendEventSessionRef.current = null;
-        clearInitialAudioTimer();
-        sessionListenersCleanupRef.current?.();
-        sessionListenersCleanupRef.current = null;
-        peerConnectionListenersCleanupRef.current?.();
-        peerConnectionListenersCleanupRef.current = null;
-        activeSession.close();
-        sessionRef.current = null;
-        clearRemoteAudio();
-        stopMicrophone(microphoneStreamRef.current);
-        microphoneStreamRef.current = null;
-        connectionRequestRef.current?.abort();
-        connectionRequestRef.current = null;
-        setErrorMessage(message);
-        updateStatus("error");
-      };
-      sessionListenersCleanupRef.current = realtimeEvents.attachSessionListeners(
-        activeSession,
-        () =>
-          mountedRef.current &&
-          sessionRef.current === activeSession &&
-          !connectionRequest.signal.aborted,
-        onSessionError,
-        remoteAudioElement,
-      );
-
-      diagnostics.beginWebRtcConnection();
-      logDiagnostic("realtime.session.config.sent");
-      console.log("Starting Realtime WebRTC connection...");
-      await activeSession.connect({ apiKey: data.client_secret });
-      console.log("Realtime WebRTC connection established.");
-      if (
-        mountedRef.current &&
-        !connectionRequest.signal.aborted &&
-        sessionRef.current === session
-      ) {
-        if (
-          !sessionConfigurationConfirmedRef.current &&
-          sessionConfigurationAcknowledgement
-        ) {
-          await waitForSessionConfigurationAcknowledgement(
-            sessionConfigurationAcknowledgement,
-            connectionRequest.signal,
-          );
-        }
-        if (
-          webRtcTransport.connectionState.dataChannel?.readyState !== "open"
-        ) {
-          throw new Error("Realtime data channel did not open.");
-        }
-        if (!sessionConfigurationConfirmedRef.current) {
-          throw new Error(SESSION_CONFIGURATION_ACK_ERROR);
-        }
-        if (!firstAssistantAudioRef.current) {
-          if (!initialGreetingTriggeredRef.current) {
-            initialGreetingTriggeredRef.current = true;
-            diagnostics.log("Requesting the initial spoken greeting");
-            logDiagnostic("realtime.response.create.sent");
-            clearInitialAudioTimer();
-            initialAudioTimerRef.current = setTimeout(() => {
-              initialAudioTimerRef.current = null;
-              if (
-                sessionRef.current === activeSession &&
-                !firstAssistantAudioRef.current
-              ) {
-                logDiagnostic(
-                  "audio.element.play_error",
-                  "No actual remote audio playback within 20 seconds",
-                );
-                onSessionError(
-                  new Error(
-                    "The AI response was requested, but no audible audio playback arrived. Check your audio output and retry.",
-                  ),
-                );
-              }
-            }, INITIAL_AUDIO_TIMEOUT_MS);
-            activeSession.transport.sendEvent({
-              type: "response.create",
-              response: {
-                instructions: `Say exactly this introduction, without adding or omitting any words: "${INITIAL_GREETING}"`,
-                output_modalities: ["audio"],
-              },
-            });
-          }
-        }
-      }
+      await peerConnection.setRemoteDescription({
+        type: "answer",
+        sdp: data.sdp,
+      });
+      await waitForLiveSessionStart(sessionStarted, connectionRequest.signal);
     } catch (error) {
-      sessionConfigurationResolveRef.current = null;
       clearInitialAudioTimer();
-      sessionListenersCleanupRef.current?.();
-      sessionListenersCleanupRef.current = null;
-      peerConnectionListenersCleanupRef.current?.();
-      peerConnectionListenersCleanupRef.current = null;
-      session?.close();
-      if (sessionRef.current === session) {
-        sessionRef.current = null;
-      }
-      clearRemoteAudio();
-      stopMicrophone(microphoneStream ?? microphoneStreamRef.current);
-      microphoneStreamRef.current = null;
-      getAudioController().stopAll();
-      logDiagnostic("initialization.music.stopped");
-      pendingBackendEventsRef.current = [];
-
-      if (mountedRef.current && !connectionRequest.signal.aborted) {
-        logBackendEvent(
-          failureCategory === "backend" ? "api.failure" : "webrtc.failure",
-          error instanceof Error ? error.name : undefined,
-        );
+      liveEvents.finalizeAssistantTurn("interrupted");
+      liveEvents.finalizeUserTurn();
+      if (connectionRequestRef.current === connectionRequest) {
         if (backendEventSessionRef.current) {
           logBackendEvent(
             "session.disconnected",
             undefined,
             performance.now() - backendEventSessionRef.current.startedAt,
           );
+          logBackendEvent("microphone.disconnected");
           backendEventSessionRef.current = null;
         }
+        releaseLiveConnection(true);
+        getAudioController().stopAll();
+        logDiagnostic("initialization.music.stopped");
+        pendingBackendEventsRef.current = [];
         if (credentialRequestStarted && !credentialRequestFinished) {
           diagnostics.finishCredentialRequest(false);
         }
-        const message = getConnectionErrorMessage(error);
-        if (failureCategory === "openai") {
-          diagnostics.recordError("OpenAI connection error", message);
+        if (mountedRef.current && !connectionRequest.signal.aborted) {
+          logBackendEvent(
+            failureCategory === "backend" ? "api.failure" : "webrtc.failure",
+            error instanceof Error ? error.name : undefined,
+          );
+          const message = getConnectionErrorMessage(error);
+          if (failureCategory === "openai") {
+            diagnostics.recordError("GPT-Live connection error", message);
+          }
+          diagnostics.endConversation();
+          setErrorMessage(message);
+          updateStatus("error");
+        } else if (connectionRequest.signal.aborted) {
+          updateStatus("idle");
         }
-        setErrorMessage(message);
-        updateStatus("error");
+      } else {
+        stopMicrophone(microphoneStream);
       }
     } finally {
-      sessionConfigurationResolveRef.current = null;
+      sessionErrorHandlerRef.current = () => {};
       if (connectionRequestRef.current === connectionRequest) {
         connectionRequestRef.current = null;
       }
     }
   }
 
-  function stopConversation() {
+  async function stopConversation() {
+    if (statusRef.current === "ending") {
+      return;
+    }
+
     const shouldAskShortlisting =
       statusRef.current !== "initializing" &&
       statusRef.current !== "requesting_permission" &&
-      sessionRef.current !== null;
+      sessionStartedRef.current;
     clearInitialAudioTimer();
-    sessionConfigurationResolveRef.current = null;
     connectionRequestRef.current?.abort();
     connectionRequestRef.current = null;
+    getAudioController().stopAll();
+    logDiagnostic("initialization.music.stopped");
+
+    if (shouldAskShortlisting) {
+      updateStatus("ending");
+      const channel = dataChannelRef.current;
+      if (channel?.readyState === "open" && !sessionCloseRequestedRef.current) {
+        sessionCloseRequestedRef.current = true;
+        let timeoutId: ReturnType<typeof setTimeout> | null = null;
+        const closed = new Promise<boolean>((resolve) => {
+          sessionCloseResolverRef.current = () => resolve(true);
+          timeoutId = setTimeout(
+            () => resolve(false),
+            LIVE_SESSION_CLOSE_TIMEOUT_MS,
+          );
+        });
+        try {
+          channel.send(
+            JSON.stringify({
+              type: "session.close",
+              event_id: crypto.randomUUID(),
+            }),
+          );
+          const confirmed = await closed;
+          if (!confirmed) {
+            diagnostics.recordError(
+              "GPT-Live close unconfirmed",
+              "The session did not confirm closure before the timeout.",
+            );
+          }
+        } catch (error) {
+          diagnostics.recordError(
+            "GPT-Live close error",
+            error instanceof Error ? error.message : "Could not send session.close.",
+          );
+        } finally {
+          if (timeoutId !== null) {
+            clearTimeout(timeoutId);
+          }
+          sessionCloseResolverRef.current = null;
+        }
+      }
+    }
+
     if (backendEventSessionRef.current) {
       logBackendEvent(
         "session.disconnected",
@@ -882,29 +890,15 @@ try {
         performance.now() - backendEventSessionRef.current.startedAt,
       );
       logBackendEvent("microphone.disconnected");
-      getAudioController().stopAll();
-      logDiagnostic("initialization.music.stopped");
       backendEventSessionRef.current = null;
-    } else {
-      getAudioController().stopAll();
-      logDiagnostic("initialization.music.stopped");
     }
-    sessionListenersCleanupRef.current?.();
-    sessionListenersCleanupRef.current = null;
-    peerConnectionListenersCleanupRef.current?.();
-    peerConnectionListenersCleanupRef.current = null;
-    sessionRef.current?.close();
-    sessionRef.current = null;
-    clearRemoteAudio();
-    stopMicrophone(microphoneStreamRef.current);
-    microphoneStreamRef.current = null;
+    releaseLiveConnection(false);
     diagnostics.endConversation();
     if (!shouldAskShortlisting) {
       updateStatus("idle");
       return;
     }
-    updateStatus("ending");
-    updateStatus("ending");
+
     transitionTimerRef.current = setTimeout(() => {
       transitionTimerRef.current = null;
       if (mountedRef.current) {
@@ -937,7 +931,7 @@ try {
 
   function replayConversation() {
     getAudioController().stopAll();
-    realtimeEvents.reset();
+    liveEvents.reset();
     updateStatus("idle");
     void startConversation();
   }
@@ -951,7 +945,6 @@ try {
     clearRemoteAudio();
     updateStatus("idle");
     setShortlisted(false);
-    initialGreetingTriggeredRef.current = false;
     firstAssistantAudioRef.current = false;
     transcript.clearTranscript();
   }

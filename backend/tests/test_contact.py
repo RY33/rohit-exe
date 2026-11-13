@@ -58,7 +58,7 @@ class ContactRouteTests(unittest.TestCase):
         self.assertEqual(response.json(), {"success": True})
         self.assertEqual(observed["authorization"], "Bearer test-resend-key")
         log_messages = "\n".join(
-            call.args[2] for call in self.email_log.call_args_list
+            call.kwargs["message"] for call in self.email_log.call_args_list
         )
         self.assertIn("from='onboarding@resend.dev'", log_messages)
         self.assertIn("to='rohit@example.com'", log_messages)
@@ -125,7 +125,7 @@ class ContactRouteTests(unittest.TestCase):
             {
                 "detail": (
                     "Resend rejected the API key. Check RESEND_API_KEY in "
-                    "backend/.env, then restart the backend."
+                    "backend environment variables."
                 )
             },
         )
@@ -201,7 +201,7 @@ class ContactRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 502)
         log_messages = "\n".join(
-            call.args[2] for call in self.email_log.call_args_list
+            call.kwargs["message"] for call in self.email_log.call_args_list
         )
         self.assertIn("HTTP 403", log_messages)
         self.assertIn('"name":"validation_error"', log_messages)

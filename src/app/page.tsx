@@ -60,7 +60,6 @@ export default function Home() {
             <span className="voice-kicker">Your next conversation starts here</span>
             <RohitVoiceAgent
               onConversationEnded={() => setIsContactOpen(true)}
-              onOpenContact={() => setIsContactOpen(true)}
             />
             <span className="voice-annotation" aria-hidden="true">
               tap to connect

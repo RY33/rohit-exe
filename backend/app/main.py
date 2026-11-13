@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from app.config import FRONTEND_ORIGINS, OPENAI_API_KEY
 from app.logging_config import configure_logging, log_event
 from app.routers.contact import router as contact_router
-from app.routers.realtime import router as realtime_router
+from app.routers.live import router as live_router
 
 configure_logging()
 
@@ -30,16 +30,13 @@ async def debug_config():
 app.add_middleware(
     CORSMiddleware,
     allow_origins=FRONTEND_ORIGINS,
+    allow_origin_regex=r"https://rohit-exe-.*-rohity33\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
-app.include_router(
-    realtime_router,
-    prefix="/api/realtime",
-    tags=["Realtime"],
-)
+app.include_router(live_router, prefix="/api/live", tags=["GPT-Live"])
 
 app.include_router(
     contact_router,
@@ -55,13 +52,13 @@ async def handle_unexpected_exception(
 ) -> JSONResponse:
     correlation_id = request.headers.get("x-correlation-id", "-")
     log_event(
-    "ERROR",
-    correlation_id=correlation_id,
-    message=(
-        f"Unexpected {request.method} {request.url.path} failure: "
-        f"{type(error).__name__}"
-    ),
-    level=logging.ERROR,
+        "ERROR",
+        correlation_id=correlation_id,
+        message=(
+            f"Unexpected {request.method} {request.url.path} failure: "
+            f"{type(error).__name__}"
+        ),
+        level=logging.ERROR,
     )
     return JSONResponse(
         status_code=500,
