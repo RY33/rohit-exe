@@ -43,6 +43,78 @@ interface RohitVoiceAgentProps {
   onConversationEnded: () => void;
 }
 
+function getBackendBaseUrl(): string | null {
+  const configuredUrl = process.env.NEXT_PUBLIC_BACKEND_URL?.trim();
+  return configuredUrl ? configuredUrl.replace(/\/+$/, "") : null;
+}
+
+function classifyHttpFailure(status: number, detail: string): string {
+  if (status === 404) return "route_not_found";
+  if (status === 401 || status === 403) return "authentication_or_authorization";
+  if (status === 422) return "invalid_request";
+  if (status === 429) return "rate_limited";
+  if (status === 500) return "backend_exception";
+  if (status === 503 && /OPENAI_API_KEY/i.test(detail)) {
+    return "backend_configuration";
+  }
+  if ((status === 502 || status === 503) && /timed out/i.test(detail)) {
+    return "openai_timeout";
+  }
+  if ((status === 502 || status === 503) && /OpenAI GPT-Live API/i.test(detail)) {
+    return "openai_session_creation_failure";
+  }
+  if (status === 502 || status === 503) return "upstream_or_infrastructure";
+  return "http_error";
+}
+
+function safeErrorBodySummary(body: string): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (!isRecord(parsed)) return "JSON error body omitted";
+    const detail = parsed.detail;
+    let summary: string;
+    if (typeof detail === "string") {
+      summary = detail;
+    } else if (Array.isArray(detail)) {
+      summary = JSON.stringify(
+        detail.map((item) => {
+          if (!isRecord(item)) return { type: "validation_error" };
+          return {
+            type: item.type,
+            loc: item.loc,
+            msg: item.msg,
+          };
+        }),
+      );
+    } else {
+      summary = "Error body omitted";
+    }
+    return summary
+      .replace(/sk-[A-Za-z0-9_-]+/gi, "[REDACTED]")
+      .replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
+      .slice(0, 1000);
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      return "Non-JSON error body omitted";
+    }
+    throw error;
+  }
+}
+
+function getErrorDetail(body: string, status: number): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (isRecord(parsed) && typeof parsed.detail === "string") {
+      return parsed.detail;
+    }
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) {
+      throw error;
+    }
+  }
+  return `Unable to create a GPT-Live session (HTTP ${status}).`;
+}
+
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null;
 }
@@ -135,7 +207,7 @@ export default function RohitVoiceAgent({
         return;
       }
 
-      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/+$/, "");
+      const backendUrl = getBackendBaseUrl();
       if (!backendUrl) {
         diagnostics.recordError(
           "Backend event logging error",
@@ -143,7 +215,7 @@ export default function RohitVoiceAgent({
         );
         return;
       }
-      void fetch(`${backendUrl ?? ""}/api/live/events`, {
+      void fetch(`${backendUrl}/api/live/events`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${session.eventToken}`,
@@ -697,17 +769,34 @@ export default function RohitVoiceAgent({
       logDiagnostic("voice.session.creation.started");
       diagnostics.beginCredentialRequest();
       credentialRequestStarted = true;
-      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/+$/, "");
+      const backendUrl = getBackendBaseUrl();
       if (!backendUrl) {
         throw new Error("NEXT_PUBLIC_BACKEND_URL is not configured.");
       }
+      const requestPath = "/api/live/session";
+      const requestUrl = `${backendUrl}${requestPath}`;
+      const clientSessionId = diagnosticSessionIdRef.current;
+      const requestId = crypto.randomUUID();
+      const requestTimestamp = new Date().toISOString();
+      const requestStartedAt = performance.now();
+      console.info("[VOICE API] session request started", {
+        clientSessionId,
+        requestId,
+        apiBaseUrl: backendUrl,
+        requestPath,
+        requestUrl,
+        requestTimestamp,
+      });
       let response: Response;
       try {
         response = await fetch(
-          `${backendUrl}/api/live/session`,
+          requestUrl,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              "X-Request-ID": requestId,
+            },
             body: JSON.stringify({ sdp: sdpOffer }),
             signal: connectionRequest.signal,
             cache: "no-store",
@@ -717,6 +806,24 @@ export default function RohitVoiceAgent({
         if (connectionRequest.signal.aborted) {
           return;
         }
+        const category =
+          error instanceof Error && error.name === "TimeoutError"
+            ? "timeout"
+            : "network_error";
+        console.error("[VOICE API] session request failed", {
+          clientSessionId,
+          requestId,
+          apiBaseUrl: backendUrl,
+          requestPath,
+          requestUrl,
+          requestTimestamp,
+          durationMs: performance.now() - requestStartedAt,
+          httpStatus: null,
+          responseContentType: null,
+          responseBody: "Response unavailable.",
+          category,
+          errorName: error instanceof Error ? error.name : "UnknownError",
+        });
         diagnostics.finishCredentialRequest(false);
         credentialRequestFinished = true;
         diagnostics.recordError("Backend error", "Could not reach the Rohit.exe API.");
@@ -727,18 +834,39 @@ export default function RohitVoiceAgent({
       }
 
       if (!response.ok) {
-        let detail = `Unable to create a GPT-Live session (HTTP ${response.status}).`;
-        try {
-          const errorBody: unknown = await response.json();
-          if (isRecord(errorBody) && typeof errorBody.detail === "string") {
-            detail = errorBody.detail;
-          }
-        } catch {
-          // Keep the HTTP status message when the backend response is not JSON.
-        }
+        const responseBody = await response.text();
+        const bodySummary = safeErrorBodySummary(responseBody);
+        const detail = getErrorDetail(responseBody, response.status);
+        const category = classifyHttpFailure(response.status, detail);
+        console.error("[VOICE API] session request rejected", {
+          clientSessionId,
+          requestId,
+          apiBaseUrl: backendUrl,
+          requestPath,
+          requestUrl,
+          requestTimestamp,
+          durationMs: performance.now() - requestStartedAt,
+          httpStatus: response.status,
+          category,
+          responseContentType: response.headers.get("content-type"),
+          responseBody: bodySummary,
+        });
         diagnostics.recordError("Backend error", detail);
         throw new Error(detail);
       }
+
+      console.info("[VOICE API] session request completed", {
+        clientSessionId,
+        requestId,
+        apiBaseUrl: backendUrl,
+        requestPath,
+        requestUrl,
+        requestTimestamp,
+        durationMs: performance.now() - requestStartedAt,
+        httpStatus: response.status,
+        responseContentType: response.headers.get("content-type"),
+        responseBody: "Session response omitted; contains SDP and event credentials.",
+      });
 
       let data: unknown;
       try {

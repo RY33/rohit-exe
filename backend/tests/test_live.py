@@ -75,11 +75,14 @@ class LiveApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "healthy"})
+        self.assertEqual(response.json()["status"], "healthy")
+        self.assertEqual(response.json()["service"], "rohit-exe-backend")
+        self.assertEqual(response.json()["environment"], "local")
         self.assertEqual(
             response.headers["access-control-allow-origin"],
             "http://localhost:3000",
         )
+        self.assertTrue(response.headers["x-request-id"])
 
     def test_health_allows_alternate_local_frontend_port(self) -> None:
         origin = "http://127.0.0.1:3001"
@@ -180,6 +183,37 @@ class LiveApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertIn("OPENAI_API_KEY is missing", response.json()["detail"])
+
+    def test_invalid_session_payload_returns_validation_error(self) -> None:
+        response = self.client.post("/api/live/session", json={})
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["detail"][0]["loc"], ["body", "sdp"])
+
+    def test_legacy_realtime_session_route_uses_live_session_handler(self) -> None:
+        def openai_response(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                201,
+                json={
+                    "session": {"id": "live_legacy_route"},
+                    "transport": {"type": "webrtc", "sdp": "v=0\r\n"},
+                },
+            )
+
+        api_key_patch, client_patch = self.mock_openai_request(openai_response)
+        with api_key_patch, client_patch:
+            response = self.client.post(
+                "/api/realtime/session",
+                json={"sdp": "v=0\r\n"},
+                headers={"X-Request-ID": "12345678-1234-1234-1234-123456789abc"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["session_id"], "live_legacy_route")
+        self.assertEqual(
+            response.headers["x-request-id"],
+            "12345678-1234-1234-1234-123456789abc",
+        )
 
     def test_openai_api_failure_returns_gateway_error(self) -> None:
         def openai_error(request: httpx.Request) -> httpx.Response:

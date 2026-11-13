@@ -1,8 +1,9 @@
 # Rohit.exe
 
 Rohit.exe is a Next.js portfolio with a GPT-Live voice representative and a
-contact form. The Next.js API routes handle OpenAI GPT-Live session creation,
-voice diagnostics, and Resend contact email delivery.
+contact form. The voice client sends session and diagnostic requests to the
+separately deployed Python API; the Next.js API routes also include server-side
+Live session and contact handlers.
 
 ## Local development
 
@@ -25,16 +26,21 @@ Vercel project settings:
 - `CONTACT_EMAIL`
 - `RESEND_FROM_EMAIL` (optional; defaults to `onboarding@resend.dev`)
 - `NEXT_PUBLIC_CALENDLY_URL` (optional)
-- `NEXT_PUBLIC_BACKEND_URL` (optional; Python backend origin when using its
-  `/api/live/session` and `/api/live/events` endpoints instead of the Next.js
-  routes)
+- `NEXT_PUBLIC_BACKEND_URL` (required; Python backend origin, for example
+  `https://rohit-exe-api.vercel.app`)
 - `LOG_TRANSCRIPT_TEXT` and `LOG_AI_RESPONSE_TEXT` (optional; default to `false`)
 
 Vercel builds and deploys the Next.js app automatically on pushes to the
 connected branch. The `/api/contact`, `/api/live/session`, and
-`/api/live/events` routes are part of that deployment.
+`/api/live/events` routes are part of that deployment. Deploy the Python API as
+a separate Vercel project with `backend` as its root directory, and configure
+`NEXT_PUBLIC_BACKEND_URL` in the frontend project's Production environment.
+The canonical voice session endpoint is
+`POST https://rohit-exe-api.vercel.app/api/live/session`; the backend also
+accepts the older `/api/realtime/session` path for compatibility with existing
+frontend deployments. `GET /health` reports the service and non-secret
+deployment identity.
 
-The original Python backend under `backend/` serves Live sessions and event
-logging when `NEXT_PUBLIC_BACKEND_URL` is set; otherwise the Next.js API routes
-are used. Contact-request rate limiting in the Next.js route is in-memory and
-best-effort on serverless instances.
+The Python backend under `backend/` serves Live sessions and event logging.
+Contact-request rate limiting in the Next.js route is in-memory and best-effort
+on serverless instances.

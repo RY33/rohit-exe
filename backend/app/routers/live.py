@@ -5,7 +5,7 @@ import time
 import uuid
 from typing import Literal, TypedDict
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.config import (
@@ -135,14 +135,22 @@ def log_frontend_event(payload: LiveEventPayload) -> None:
 
 
 @router.post("/session", response_model=LiveSessionResponse)
-async def create_session(request: LiveSessionRequest) -> LiveSessionResponse:
-    request_id = str(uuid.uuid4())
-    log_event("SESSION", request_id, "GPT-Live session requested")
+async def create_session(
+    payload: LiveSessionRequest,
+    http_request: Request,
+) -> LiveSessionResponse:
+    request_id = getattr(http_request.state, "request_id", str(uuid.uuid4()))
+    log_event("SESSION", request_id, "GPT-Live session handler entered")
+    log_event("SESSION", request_id, "GPT-Live session creation started")
     try:
-        session_data = await create_live_session(request.sdp)
+        session_data = await create_live_session(payload.sdp, request_id)
         event_expires_at = int(time.time()) + EVENT_TOKEN_LIFETIME_SECONDS
         event_token = create_event_token(session_data["session_id"], event_expires_at)
-        log_event("SESSION", session_data["session_id"], "GPT-Live session created")
+        log_event(
+            "SESSION",
+            request_id,
+            f"GPT-Live session creation completed session_id={session_data['session_id']}",
+        )
         return {
             "success": True,
             "session_id": session_data["session_id"],
@@ -154,7 +162,8 @@ async def create_session(request: LiveSessionRequest) -> LiveSessionResponse:
         log_event(
             "ERROR",
             request_id,
-            f"GPT-Live session creation failed (HTTP {error.status_code})",
+            f"GPT-Live session creation failed category={error.category} "
+            f"http_status={error.status_code}",
             logging.WARNING,
         )
         raise HTTPException(
