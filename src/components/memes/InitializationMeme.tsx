@@ -20,6 +20,7 @@ export default function InitializationMeme({
       className="initialization-backdrop"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
       role="status"
       aria-live="polite"
     >

@@ -338,6 +338,32 @@ class LiveApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
 
+    def test_event_endpoint_accepts_first_audio_diagnostics(self) -> None:
+        expiry = int(time.time()) + 60
+        events = (
+            "assistant.first_audio.received",
+            "assistant.first_audio.playback_started",
+            "ui.cat.hide.triggered",
+        )
+        responses = [
+            self.client.post(
+                "/api/live/events",
+                headers={
+                    "Authorization": (
+                        f"Bearer {create_event_token('session-one', expiry)}"
+                    )
+                },
+                json={
+                    "session_id": "session-one",
+                    "event_expires_at": expiry,
+                    "event": event,
+                },
+            )
+            for event in events
+        ]
+
+        self.assertEqual([response.status_code for response in responses], [202] * 3)
+
     def test_concurrent_events_keep_their_session_ids(self) -> None:
         expiry = int(time.time()) + 60
         sessions = ("session-one", "session-two")

@@ -159,8 +159,14 @@ export default function RohitVoiceAgent({
   const [errorMessage, setErrorMessage] = useState("");
   const [memeAudioError, setMemeAudioError] = useState("");
   const [audioPlaybackError, setAudioPlaybackError] = useState("");
+  const [hasAssistantStartedSpeaking, setHasAssistantStartedSpeaking] =
+    useState(false);
   const [shortlisted, setShortlisted] = useState(false);
   const remoteAudioElementRef = useRef<HTMLAudioElement>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioAnalysisFrameRef = useRef<number | null>(null);
+  const remoteAudioIsPlayingRef = useRef(false);
+  const remoteAudioHasNonSilentOutputRef = useRef(false);
   const sessionRef = useRef<string | null>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
@@ -253,17 +259,26 @@ export default function RohitVoiceAgent({
       const sessionId =
         backendEventSessionRef.current?.sessionId ??
         diagnosticSessionIdRef.current;
-      const category = event.startsWith("audio.")
-        ? "AUDIO"
-        : event.startsWith("initialization.music.")
-          ? "AUDIO"
-        : event.startsWith("ui.") || event.startsWith("initialization.")
-          ? "UI"
-          : event.startsWith("voice.") || event.startsWith("microphone.")
-            ? "VOICE"
-            : event.startsWith("webrtc.")
-              ? "WEBRTC"
-              : "LIVE";
+      let category = "LIVE";
+      if (
+        event.startsWith("audio.") ||
+        event.startsWith("initialization.music.") ||
+        event.startsWith("assistant.first_audio.")
+      ) {
+        category = "AUDIO";
+      } else if (
+        event.startsWith("ui.") ||
+        event.startsWith("initialization.")
+      ) {
+        category = "UI";
+      } else if (
+        event.startsWith("voice.") ||
+        event.startsWith("microphone.")
+      ) {
+        category = "VOICE";
+      } else if (event.startsWith("webrtc.")) {
+        category = "WEBRTC";
+      }
       const message = `[${category}] ${new Date().toISOString()} [session=${sessionId}] ${event}${detail ? ` ${detail}` : ""}`;
       console.info(message);
       diagnostics.log(message);
@@ -282,8 +297,6 @@ export default function RohitVoiceAgent({
       logDiagnostic("ui.initialization.changed", `${previousStatus} -> ${nextStatus}`);
       if (nextStatus === "initializing") {
         logDiagnostic("ui.cat.shown");
-      } else if (previousStatus === "initializing") {
-        logDiagnostic("ui.cat.hidden");
       }
     },
     [logDiagnostic],
@@ -301,6 +314,30 @@ export default function RohitVoiceAgent({
       audioElement.srcObject = null;
     }
   }, []);
+  const clearInitialAudioTimer = useCallback(() => {
+    if (initialAudioTimerRef.current !== null) {
+      clearTimeout(initialAudioTimerRef.current);
+      initialAudioTimerRef.current = null;
+    }
+  }, []);
+  const clearAudioLevelMonitor = useCallback(() => {
+    if (audioAnalysisFrameRef.current !== null) {
+      cancelAnimationFrame(audioAnalysisFrameRef.current);
+      audioAnalysisFrameRef.current = null;
+    }
+    const audioContext = audioContextRef.current;
+    audioContextRef.current = null;
+    remoteAudioIsPlayingRef.current = false;
+    remoteAudioHasNonSilentOutputRef.current = false;
+    if (audioContext && audioContext.state !== "closed") {
+      void audioContext.close().catch((error: unknown) => {
+        logDiagnostic(
+          "audio.analysis.close_failed",
+          error instanceof Error ? error.message : "Unable to close AudioContext.",
+        );
+      });
+    }
+  }, [logDiagnostic]);
   const releaseLiveConnection = useCallback(
     (sendCloseEvent: boolean) => {
       const channel = dataChannelRef.current;
@@ -332,18 +369,13 @@ export default function RohitVoiceAgent({
       peerConnectionRef.current?.close();
       peerConnectionRef.current = null;
       sessionCloseRequestedRef.current = false;
+      clearAudioLevelMonitor();
       clearRemoteAudio();
       stopMicrophone(microphoneStreamRef.current);
       microphoneStreamRef.current = null;
     },
-    [clearRemoteAudio],
+    [clearAudioLevelMonitor, clearRemoteAudio],
   );
-  const clearInitialAudioTimer = useCallback(() => {
-    if (initialAudioTimerRef.current !== null) {
-      clearTimeout(initialAudioTimerRef.current);
-      initialAudioTimerRef.current = null;
-    }
-  }, []);
   const playRemoteAudio = useCallback(async () => {
     const audioElement = remoteAudioElementRef.current;
     if (!audioElement || !audioElement.srcObject) {
@@ -375,10 +407,35 @@ export default function RohitVoiceAgent({
     }
     firstAssistantAudioRef.current = true;
     clearInitialAudioTimer();
+    setHasAssistantStartedSpeaking(true);
+    logDiagnostic("assistant.first_audio.playback_started");
+    logDiagnostic("ui.cat.hide.triggered");
+    logDiagnostic("ui.cat.hidden");
+    logBackendEvent("audio.playback.started");
+    logBackendEvent("ai.audio.playback_started");
     updateStatus("speaking");
     audioControllerRef.current?.stopMusic();
     logDiagnostic("initialization.music.stopped");
-  }, [clearInitialAudioTimer, logDiagnostic, updateStatus]);
+  }, [
+    clearInitialAudioTimer,
+    logBackendEvent,
+    logDiagnostic,
+    updateStatus,
+  ]);
+  const maybeHandleFirstAiAudioStarted = useCallback(() => {
+    const audioElement = remoteAudioElementRef.current;
+    if (
+      !audioElement ||
+      audioElement.paused ||
+      audioElement.muted ||
+      audioElement.volume === 0 ||
+      !remoteAudioIsPlayingRef.current ||
+      !remoteAudioHasNonSilentOutputRef.current
+    ) {
+      return;
+    }
+    handleFirstAiAudioStarted();
+  }, [handleFirstAiAudioStarted]);
   const liveEvents = useLiveSessionEvents(
     transcript,
     diagnostics,
@@ -398,13 +455,11 @@ export default function RohitVoiceAgent({
       logDiagnostic("audio.element.play_error", message);
     };
     const onRemoteAudioPlaying = () => {
-      const isFirstAssistantAudio = !firstAssistantAudioRef.current;
-      handleFirstAiAudioStarted();
-      if (isFirstAssistantAudio) {
+      remoteAudioIsPlayingRef.current = true;
+      if (!firstAssistantAudioRef.current) {
         logDiagnostic("audio.element.playing");
-        logBackendEvent("audio.playback.started");
-        logBackendEvent("ai.audio.playback_started");
       }
+      maybeHandleFirstAiAudioStarted();
     };
     audioElement?.addEventListener("error", onRemoteAudioError);
     audioElement?.addEventListener("playing", onRemoteAudioPlaying);
@@ -413,6 +468,7 @@ export default function RohitVoiceAgent({
       audioElement?.removeEventListener("error", onRemoteAudioError);
       audioElement?.removeEventListener("playing", onRemoteAudioPlaying);
       mountedRef.current = false;
+      clearAudioLevelMonitor();
       const backendSession = backendEventSessionRef.current;
       if (backendSession) {
         logDiagnostic("initialization.music.stopped");
@@ -443,9 +499,10 @@ export default function RohitVoiceAgent({
     };
   }, [
     clearInitialAudioTimer,
+    clearAudioLevelMonitor,
     clearRemoteAudio,
     getAudioController,
-    handleFirstAiAudioStarted,
+    maybeHandleFirstAiAudioStarted,
     releaseLiveConnection,
     logDiagnostic,
     logBackendEvent,
@@ -463,6 +520,9 @@ export default function RohitVoiceAgent({
     sessionStartedRef.current = false;
     sessionCloseRequestedRef.current = false;
     firstAssistantAudioRef.current = false;
+    setHasAssistantStartedSpeaking(false);
+    clearAudioLevelMonitor();
+    remoteAudioIsPlayingRef.current = false;
     diagnostics.startConversation();
     logDiagnostic("voice.button.clicked");
 
@@ -623,13 +683,80 @@ export default function RohitVoiceAgent({
           `tracks=${remoteStream.getAudioTracks().length}`,
         );
 
+        clearAudioLevelMonitor();
+        try {
+          const audioContext = new AudioContext();
+          audioContextRef.current = audioContext;
+          const analyser = audioContext.createAnalyser();
+          analyser.fftSize = 512;
+          const source = audioContext.createMediaStreamSource(remoteStream);
+          const silentGain = audioContext.createGain();
+          silentGain.gain.value = 0;
+          source.connect(analyser);
+          analyser.connect(silentGain);
+          silentGain.connect(audioContext.destination);
+
+          const samples = new Float32Array(analyser.fftSize);
+          let consecutiveAudibleFrames = 0;
+          const analyzeRemoteAudio = () => {
+            if (audioContextRef.current !== audioContext) {
+              return;
+            }
+            if (firstAssistantAudioRef.current) {
+              audioAnalysisFrameRef.current = null;
+              return;
+            }
+            analyser.getFloatTimeDomainData(samples);
+            let squaredSampleTotal = 0;
+            for (const sample of samples) {
+              squaredSampleTotal += sample * sample;
+            }
+            const rms = Math.sqrt(squaredSampleTotal / samples.length);
+            consecutiveAudibleFrames =
+              rms >= 0.01 ? consecutiveAudibleFrames + 1 : 0;
+            if (
+              consecutiveAudibleFrames >= 2 &&
+              !remoteAudioHasNonSilentOutputRef.current
+            ) {
+              remoteAudioHasNonSilentOutputRef.current = true;
+              logDiagnostic(
+                "assistant.first_audio.received",
+                `non-silent remote audio detected; rms=${rms.toFixed(4)}`,
+              );
+              maybeHandleFirstAiAudioStarted();
+            }
+            if (firstAssistantAudioRef.current) {
+              audioAnalysisFrameRef.current = null;
+              return;
+            }
+            audioAnalysisFrameRef.current =
+              requestAnimationFrame(analyzeRemoteAudio);
+          };
+          audioAnalysisFrameRef.current =
+            requestAnimationFrame(analyzeRemoteAudio);
+          void audioContext.resume().then(
+            () => logDiagnostic("audio.analysis.started"),
+            (error: unknown) =>
+              logDiagnostic(
+                "audio.analysis.resume_failed",
+                error instanceof Error ? error.message : "Unable to resume AudioContext.",
+              ),
+          );
+          peerConnectionCleanups.push(clearAudioLevelMonitor);
+        } catch (error) {
+          clearAudioLevelMonitor();
+          logDiagnostic(
+            "audio.analysis.unavailable",
+            error instanceof Error ? error.message : "Unable to monitor remote audio.",
+          );
+        }
+
         const onTrackMuted = () => logDiagnostic("audio.track.muted");
         const onTrackUnmuted = () => {
           if (peerConnectionRef.current !== peerConnection) {
             return;
           }
           logDiagnostic("audio.track.unmuted");
-          handleFirstAiAudioStarted();
           void playRemoteAudio();
         };
         event.track.addEventListener("mute", onTrackMuted);
@@ -1074,6 +1201,7 @@ export default function RohitVoiceAgent({
     updateStatus("idle");
     setShortlisted(false);
     firstAssistantAudioRef.current = false;
+    setHasAssistantStartedSpeaking(false);
     transcript.clearTranscript();
   }
 
@@ -1085,6 +1213,9 @@ export default function RohitVoiceAgent({
     "speaking",
     "ending",
   ].includes(status);
+  const isInitializationMemeVisible =
+    !hasAssistantStartedSpeaking &&
+    ["initializing", "connected", "listening", "speaking"].includes(status);
   return (
     <>
       <audio
@@ -1134,13 +1265,16 @@ export default function RohitVoiceAgent({
         )}
       </div>
 
-      {status === "initializing" && (
-        <InitializationMeme
-          audioError={audioPlaybackError || memeAudioError}
-          canRetryAudio={audioPlaybackError !== ""}
-          onRetryAudio={() => void playRemoteAudio()}
-        />
-      )}
+      <AnimatePresence>
+        {isInitializationMemeVisible && (
+          <InitializationMeme
+            key="initialization"
+            audioError={audioPlaybackError || memeAudioError}
+            canRetryAudio={audioPlaybackError !== ""}
+            onRetryAudio={() => void playRemoteAudio()}
+          />
+        )}
+      </AnimatePresence>
 
       <AnimatePresence mode="wait">
         {status === "asking_shortlisting" ? (
