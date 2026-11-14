@@ -32,6 +32,13 @@ type VoiceStatus =
 
 type UnknownRecord = Record<string, unknown>;
 
+interface BackendEventSession {
+  sessionId: string;
+  eventToken: string;
+  eventExpiresAt: number;
+  startedAt: number;
+}
+
 const INITIAL_GREETING =
   "Hey! I'm Rohit.exe — Rohit's AI-powered digital portfolio. Think of me as the slightly more talkative version of his resume. I can walk you through the AI products he's built, the scale they operate at, and the impact they've made. What would you like to know?";
 const INITIAL_AUDIO_TIMEOUT_MS = 20_000;
@@ -187,16 +194,13 @@ export default function RohitVoiceAgent({
   const sessionCloseResolverRef = useRef<(() => void) | null>(null);
   const sessionCloseRequestedRef = useRef(false);
   const sessionErrorHandlerRef = useRef<(error: unknown) => void>(() => {});
-  const backendEventSessionRef = useRef<{
-    sessionId: string;
-    eventToken: string;
-    eventExpiresAt: number;
-    startedAt: number;
-  } | null>(null);
+  const backendEventSessionRef = useRef<BackendEventSession | null>(null);
+  const reactionBackendEventSessionRef = useRef<BackendEventSession | null>(null);
   const mountedRef = useRef(false);
   const firstAssistantAudioRef = useRef(false);
   const transitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reactionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reactionGenerationRef = useRef(0);
   const initialAudioTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const audioControllerRef = useRef<MemeAudioController | null>(null);
   const transcript = useConversationTranscript();
@@ -206,8 +210,9 @@ export default function RohitVoiceAgent({
       event: BackendVoiceEvent,
       text?: string,
       durationMs?: number,
+      sessionOverride?: BackendEventSession | null,
     ) => {
-      const session = backendEventSessionRef.current;
+      const session = sessionOverride ?? backendEventSessionRef.current;
       if (!session) {
         pendingBackendEventsRef.current.push({ event, text, durationMs });
         return;
@@ -286,6 +291,25 @@ export default function RohitVoiceAgent({
     },
     [diagnostics.log, logBackendEvent],
   );
+  const logReactionDiagnostic = useCallback(
+    (event: BackendVoiceEvent, detail?: string) => {
+      const sessionId =
+        backendEventSessionRef.current?.sessionId ??
+        reactionBackendEventSessionRef.current?.sessionId ??
+        diagnosticSessionIdRef.current;
+      const category = event.includes("music") ? "AUDIO" : "UI";
+      const message = `[${category}] ${new Date().toISOString()} [session=${sessionId}] ${event}${detail ? ` ${detail}` : ""}`;
+      console.info(message);
+      diagnostics.log(message);
+      logBackendEvent(
+        event,
+        detail,
+        undefined,
+        reactionBackendEventSessionRef.current,
+      );
+    },
+    [diagnostics.log, logBackendEvent],
+  );
   const updateStatus = useCallback(
     (nextStatus: VoiceStatus) => {
       const previousStatus = statusRef.current;
@@ -294,12 +318,30 @@ export default function RohitVoiceAgent({
       }
       statusRef.current = nextStatus;
       setStatus(nextStatus);
-      logDiagnostic("ui.initialization.changed", `${previousStatus} -> ${nextStatus}`);
+      const stateTransition = `${previousStatus} -> ${nextStatus}`;
+      if (
+        [
+          "asking_shortlisting",
+          "happy_reaction",
+          "sad_reaction",
+          "finished",
+        ].includes(nextStatus) ||
+        [
+          "asking_shortlisting",
+          "happy_reaction",
+          "sad_reaction",
+          "finished",
+        ].includes(previousStatus)
+      ) {
+        logReactionDiagnostic("ui.initialization.changed", stateTransition);
+      } else {
+        logDiagnostic("ui.initialization.changed", stateTransition);
+      }
       if (nextStatus === "initializing") {
         logDiagnostic("ui.cat.shown");
       }
     },
-    [logDiagnostic],
+    [logDiagnostic, logReactionDiagnostic],
   );
   const getAudioController = useCallback(() => {
     if (!audioControllerRef.current) {
@@ -479,6 +521,7 @@ export default function RohitVoiceAgent({
         );
         logBackendEvent("microphone.disconnected");
         backendEventSessionRef.current = null;
+        reactionBackendEventSessionRef.current = null;
       }
       connectionRequestRef.current?.abort();
       connectionRequestRef.current = null;
@@ -492,7 +535,9 @@ export default function RohitVoiceAgent({
       }
       if (reactionTimerRef.current !== null) {
         clearTimeout(reactionTimerRef.current);
+        reactionTimerRef.current = null;
       }
+      reactionGenerationRef.current += 1;
       audioControllerRef.current?.stopMusic();
       audioControllerRef.current?.dispose();
       audioControllerRef.current = null;
@@ -515,6 +560,7 @@ export default function RohitVoiceAgent({
     }
 
     backendEventSessionRef.current = null;
+    reactionBackendEventSessionRef.current = null;
     pendingBackendEventsRef.current = [];
     diagnosticSessionIdRef.current = `client-${crypto.randomUUID()}`;
     sessionStartedRef.current = false;
@@ -534,6 +580,7 @@ export default function RohitVoiceAgent({
       clearTimeout(reactionTimerRef.current);
       reactionTimerRef.current = null;
     }
+    reactionGenerationRef.current += 1;
     setMemeAudioError("");
     setAudioPlaybackError("");
     setShortlisted(false);
@@ -575,6 +622,7 @@ export default function RohitVoiceAgent({
         error instanceof Error ? error.name : undefined,
       );
       if (backendEventSessionRef.current) {
+        reactionBackendEventSessionRef.current = backendEventSessionRef.current;
         logBackendEvent(
           "session.disconnected",
           undefined,
@@ -1041,6 +1089,7 @@ export default function RohitVoiceAgent({
       liveEvents.finalizeUserTurn();
       if (connectionRequestRef.current === connectionRequest) {
         if (backendEventSessionRef.current) {
+          reactionBackendEventSessionRef.current = backendEventSessionRef.current;
           logBackendEvent(
             "session.disconnected",
             undefined,
@@ -1139,6 +1188,7 @@ export default function RohitVoiceAgent({
     }
 
     if (backendEventSessionRef.current) {
+      reactionBackendEventSessionRef.current = backendEventSessionRef.current;
       logBackendEvent(
         "session.disconnected",
         undefined,
@@ -1162,26 +1212,107 @@ export default function RohitVoiceAgent({
     }, 250);
   }
 
-  function chooseShortlisting(shortlisted: boolean) {
-    setShortlisted(shortlisted);
-    setMemeAudioError("");
-    updateStatus(shortlisted ? "happy_reaction" : "sad_reaction");
+  function startReactionPresentation(
+    reactionGeneration: number,
+    reactionStatus: "happy_reaction" | "sad_reaction",
+    isHappyReaction: boolean,
+    isHappyCatVisible: boolean,
+  ) {
+    if (
+      !mountedRef.current ||
+      reactionGenerationRef.current !== reactionGeneration ||
+      statusRef.current !== reactionStatus ||
+      reactionTimerRef.current !== null
+    ) {
+      return;
+    }
+
+    let musicStarted = false;
+    let musicCompleted = false;
+    const audioCallbacks = isHappyReaction
+      ? {
+          onStarted: () => {
+            musicStarted = true;
+            logReactionDiagnostic(
+              "happy_music.started",
+              "Happy cat audio emitted a playing event",
+            );
+          },
+          onCompleted: () => {
+            musicCompleted = true;
+            logReactionDiagnostic(
+              "happy_music.completed",
+              "Happy cat audio reached its ended event",
+            );
+          },
+        }
+      : {};
     void getAudioController().playReaction(
-      shortlisted ? "happy-cat" : "cooked-dog",
+      isHappyReaction ? "happy-cat" : "cooked-dog",
       (message) => {
-        if (mountedRef.current) {
+        if (
+          mountedRef.current &&
+          reactionGenerationRef.current === reactionGeneration
+        ) {
           setMemeAudioError(message);
+          logReactionDiagnostic("reaction_music.error", message);
         }
       },
+      audioCallbacks,
+    );
+
+    logReactionDiagnostic(
+      isHappyReaction
+        ? "happy_reaction.timer.started"
+        : "sad_reaction.timer.started",
+      `durationMs=${REACTION_DISPLAY_DURATION_MS}; presentation=visible; reaction=${reactionStatus}`,
     );
     reactionTimerRef.current = setTimeout(() => {
       reactionTimerRef.current = null;
-      if (mountedRef.current) {
+      if (
+        mountedRef.current &&
+        reactionGenerationRef.current === reactionGeneration &&
+        statusRef.current === reactionStatus
+      ) {
+        if (isHappyReaction && isHappyCatVisible) {
+          logReactionDiagnostic(
+            "happy_cat.animation.completed",
+            `visibleDurationMs=${REACTION_DISPLAY_DURATION_MS}`,
+          );
+        }
+        if (isHappyReaction && musicStarted && !musicCompleted) {
+          musicCompleted = true;
+          logReactionDiagnostic(
+            "happy_music.completed",
+            `Playback stopped with the ${REACTION_DISPLAY_DURATION_MS} ms reaction`,
+          );
+        }
+        logReactionDiagnostic(
+          isHappyReaction
+            ? "happy_reaction.exited"
+            : "sad_reaction.exited",
+          `reactState=${statusRef.current}; durationMs=${REACTION_DISPLAY_DURATION_MS}`,
+        );
         getAudioController().stopAll();
         updateStatus("finished");
         onConversationEnded();
       }
     }, REACTION_DISPLAY_DURATION_MS);
+  }
+
+  function chooseShortlisting(shortlisted: boolean) {
+    if (statusRef.current !== "asking_shortlisting") {
+      return;
+    }
+
+    if (reactionTimerRef.current !== null) {
+      clearTimeout(reactionTimerRef.current);
+      reactionTimerRef.current = null;
+    }
+    const reactionGeneration = ++reactionGenerationRef.current;
+    setShortlisted(shortlisted);
+    setMemeAudioError("");
+    updateStatus(shortlisted ? "happy_reaction" : "sad_reaction");
   }
 
   function replayConversation() {
@@ -1192,6 +1323,7 @@ export default function RohitVoiceAgent({
   }
 
   function backToPortfolio() {
+    reactionGenerationRef.current += 1;
     if (reactionTimerRef.current !== null) {
       clearTimeout(reactionTimerRef.current);
       reactionTimerRef.current = null;
@@ -1216,6 +1348,7 @@ export default function RohitVoiceAgent({
   const isInitializationMemeVisible =
     !hasAssistantStartedSpeaking &&
     ["initializing", "connected", "listening", "speaking"].includes(status);
+  const renderedReactionGeneration = reactionGenerationRef.current;
   return (
     <>
       <audio
@@ -1285,8 +1418,18 @@ export default function RohitVoiceAgent({
         ) : status === "happy_reaction" || status === "sad_reaction" ? (
           <ReactionMeme
             key="reaction"
+            status={status}
             shortlisted={shortlisted}
             audioError={memeAudioError}
+            onDiagnostic={logReactionDiagnostic}
+            onPresentationReady={(imageVisible) =>
+              startReactionPresentation(
+                renderedReactionGeneration,
+                status,
+                shortlisted,
+                imageVisible,
+              )
+            }
           />
         ) : status === "finished" ? (
           <FinalScreen

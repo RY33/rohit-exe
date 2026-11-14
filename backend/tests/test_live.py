@@ -338,12 +338,37 @@ class LiveApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
 
-    def test_event_endpoint_accepts_first_audio_diagnostics(self) -> None:
+    def test_event_endpoint_accepts_reaction_diagnostics(self) -> None:
         expiry = int(time.time()) + 60
         events = (
             "assistant.first_audio.received",
             "assistant.first_audio.playback_started",
             "ui.cat.hide.triggered",
+            "happy_reaction.entered",
+            "happy_reaction.timer.started",
+            "happy_reaction.exited",
+            "happy_cat.component.mounted",
+            "happy_cat.image.loading",
+            "happy_cat.image.loaded",
+            "happy_cat.image.error",
+            "happy_cat.visibility.changed",
+            "happy_cat.animation.started",
+            "happy_cat.animation.completed",
+            "happy_reaction.backdrop.animation.started",
+            "happy_reaction.backdrop.animation.completed",
+            "happy_music.started",
+            "happy_music.completed",
+            "sad_reaction.entered",
+            "sad_reaction.timer.started",
+            "sad_reaction.exited",
+            "sad_reaction.backdrop.animation.started",
+            "sad_reaction.backdrop.animation.completed",
+            "reaction_meme.component.mounted",
+            "reaction_meme.image.loading",
+            "reaction_meme.image.loaded",
+            "reaction_meme.image.error",
+            "reaction_meme.visibility.changed",
+            "reaction_music.error",
         )
         responses = [
             self.client.post(
@@ -362,7 +387,10 @@ class LiveApiTests(unittest.TestCase):
             for event in events
         ]
 
-        self.assertEqual([response.status_code for response in responses], [202] * 3)
+        self.assertEqual(
+            [response.status_code for response in responses],
+            [202] * len(events),
+        )
 
     def test_concurrent_events_keep_their_session_ids(self) -> None:
         expiry = int(time.time()) + 60

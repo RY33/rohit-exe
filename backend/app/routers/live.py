@@ -60,6 +60,31 @@ _EVENTS: dict[str, tuple[str, str]] = {
     "ui.cat.shown": ("UI", "Initialization cat shown"),
     "ui.cat.hidden": ("UI", "Initialization cat hidden"),
     "ui.initialization.changed": ("UI", "Initialization status changed"),
+    "happy_reaction.entered": ("UI", "Happy reaction entered"),
+    "happy_reaction.timer.started": ("UI", "Happy reaction timer started"),
+    "happy_reaction.exited": ("UI", "Happy reaction exited"),
+    "happy_cat.component.mounted": ("UI", "Happy cat component mounted"),
+    "happy_cat.image.loading": ("UI", "Happy cat image loading"),
+    "happy_cat.image.loaded": ("UI", "Happy cat image loaded"),
+    "happy_cat.image.error": ("ERROR", "Happy cat image failed to load"),
+    "happy_cat.visibility.changed": ("UI", "Happy cat visibility changed"),
+    "happy_cat.animation.started": ("UI", "Happy cat animation started"),
+    "happy_cat.animation.completed": ("UI", "Happy cat animation completed"),
+    "happy_reaction.backdrop.animation.started": ("UI", "Happy reaction backdrop animation started"),
+    "happy_reaction.backdrop.animation.completed": ("UI", "Happy reaction backdrop animation completed"),
+    "happy_music.started": ("AUDIO", "Happy music started"),
+    "happy_music.completed": ("AUDIO", "Happy music completed"),
+    "sad_reaction.entered": ("UI", "Sad reaction entered"),
+    "sad_reaction.timer.started": ("UI", "Sad reaction timer started"),
+    "sad_reaction.exited": ("UI", "Sad reaction exited"),
+    "sad_reaction.backdrop.animation.started": ("UI", "Sad reaction backdrop animation started"),
+    "sad_reaction.backdrop.animation.completed": ("UI", "Sad reaction backdrop animation completed"),
+    "reaction_meme.component.mounted": ("UI", "Reaction meme component mounted"),
+    "reaction_meme.image.loading": ("UI", "Reaction meme image loading"),
+    "reaction_meme.image.loaded": ("UI", "Reaction meme image loaded"),
+    "reaction_meme.image.error": ("ERROR", "Reaction meme image failed to load"),
+    "reaction_meme.visibility.changed": ("UI", "Reaction meme visibility changed"),
+    "reaction_music.error": ("ERROR", "Reaction music failed to play"),
     "speech.detected": ("TRANSCRIPTION", "User speech detected"),
     "transcription.started": ("TRANSCRIPTION", "Transcription started"),
     "transcription.completed": ("TRANSCRIPTION", "Final text"),
@@ -136,6 +161,11 @@ def log_frontend_event(payload: LiveEventPayload) -> None:
             message = f'{label}: "{_safe_content(payload.text)}"'
         else:
             message = "AI response generated (text redacted)"
+    elif (
+        payload.event == "ui.initialization.changed"
+        or payload.event.startswith(("happy_", "sad_", "reaction_"))
+    ) and payload.text:
+        message = f"{label}: {_safe_content(payload.text)}"
     if payload.duration_ms is not None:
         message = f"{message} ({payload.duration_ms:.1f} ms)"
     log_event(category, payload.session_id, message, level)

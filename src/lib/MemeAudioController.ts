@@ -1,5 +1,10 @@
 export type ReactionAudio = "happy-cat" | "cooked-dog";
 
+interface ReactionAudioCallbacks {
+  onStarted?: () => void;
+  onCompleted?: () => void;
+}
+
 const audioPaths = {
   "spinning-cat": "/assets/memes/spinning-cat.mp3",
   "happy-cat": "/assets/memes/happy-cat.mp3",
@@ -10,6 +15,7 @@ export class MemeAudioController {
   private readonly preloadedAudio = new Map<string, HTMLAudioElement>();
   private currentAudio: HTMLAudioElement | null = null;
   private currentErrorHandler: (() => void) | null = null;
+  private currentPlaybackCleanup: (() => void) | null = null;
   private generation = 0;
   private disposed = false;
 
@@ -38,8 +44,9 @@ export class MemeAudioController {
   playReaction(
     reaction: ReactionAudio,
     onError: (message: string) => void,
+    callbacks: ReactionAudioCallbacks = {},
   ): Promise<void> {
-    return this.playAsset(reaction, false, onError);
+    return this.playAsset(reaction, false, onError, callbacks);
   }
 
   stopMusic(): void {
@@ -52,6 +59,7 @@ export class MemeAudioController {
       if (this.currentErrorHandler) {
         this.currentAudio.removeEventListener("error", this.currentErrorHandler);
       }
+      this.currentPlaybackCleanup?.();
       this.currentAudio.volume = 0;
       this.currentAudio.pause();
       if (this.currentAudio.readyState > 0) {
@@ -60,6 +68,7 @@ export class MemeAudioController {
     }
     this.currentAudio = null;
     this.currentErrorHandler = null;
+    this.currentPlaybackCleanup = null;
   }
 
   dispose(): void {
@@ -77,6 +86,7 @@ export class MemeAudioController {
     asset: keyof typeof audioPaths,
     loop: boolean,
     onError: (message: string) => void,
+    callbacks: ReactionAudioCallbacks = {},
   ): Promise<void> {
     this.stopAll();
     if (this.disposed || typeof window === "undefined") {
@@ -108,6 +118,24 @@ export class MemeAudioController {
     };
     this.currentErrorHandler = handleError;
     audio.addEventListener("error", handleError, { once: true });
+    const isCurrentPlayback = () =>
+      generation === this.generation && this.currentAudio === audio;
+    const handlePlaying = () => {
+      if (isCurrentPlayback()) {
+        callbacks.onStarted?.();
+      }
+    };
+    const handleEnded = () => {
+      if (isCurrentPlayback()) {
+        callbacks.onCompleted?.();
+      }
+    };
+    audio.addEventListener("playing", handlePlaying);
+    audio.addEventListener("ended", handleEnded, { once: true });
+    this.currentPlaybackCleanup = () => {
+      audio.removeEventListener("playing", handlePlaying);
+      audio.removeEventListener("ended", handleEnded);
+    };
 
     if (audio.error) {
       handleError();

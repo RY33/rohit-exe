@@ -94,3 +94,50 @@ test("shortlisting reactions play their existing local audio assets", async () =
 
   controller.dispose();
 });
+
+test("reaction playback reports real start and completion events across sessions", async () => {
+  FakeAudio.instances = [];
+  globalThis.Audio = FakeAudio;
+  globalThis.window = {};
+
+  const { MemeAudioController } = await import("./MemeAudioController.ts");
+  const controller = new MemeAudioController();
+  controller.preloadAssets();
+  const lifecycle = [];
+
+  await controller.playReaction("happy-cat", () => assert.fail("Playback failed"), {
+    onStarted: () => lifecycle.push("stale-started"),
+    onCompleted: () => lifecycle.push("stale-completed"),
+  });
+  const audio = FakeAudio.instances.find((instance) =>
+    instance.src.endsWith("/assets/memes/happy-cat.mp3"),
+  );
+  assert.ok(audio);
+  controller.stopAll();
+  audio.dispatchEvent(new Event("playing"));
+  audio.dispatchEvent(new Event("ended"));
+  assert.deepEqual(lifecycle, []);
+
+  for (let session = 0; session < 3; session += 1) {
+    await controller.playReaction(
+      "happy-cat",
+      (message) => assert.fail(message),
+      {
+        onStarted: () => lifecycle.push(`started-${session}`),
+        onCompleted: () => lifecycle.push(`completed-${session}`),
+      },
+    );
+    audio.dispatchEvent(new Event("playing"));
+    audio.dispatchEvent(new Event("ended"));
+  }
+
+  assert.deepEqual(lifecycle, [
+    "started-0",
+    "completed-0",
+    "started-1",
+    "completed-1",
+    "started-2",
+    "completed-2",
+  ]);
+  controller.dispose();
+});
